@@ -245,7 +245,7 @@
 )
 
 (defun mcp-cmd-entity-get (params / entity-id ent ent-data etype handle elayer
-                                  result pts n closed)
+                                  result pts n closed just tpt)
   (setq entity-id (mcp-json-get-string params "entity_id"))
   (if (= entity-id "last")
     (setq ent (entlast))
@@ -290,11 +290,22 @@
            ",\"position\":" (mcp-pt-json (cdr (assoc 10 ent-data))))))
 
         ((or (= etype "TEXT") (= etype "ATTDEF") (= etype "ATTRIB"))
+         ;; For justified text AutoCAD recomputes group 10 into the equivalent
+         ;; left-baseline point and keeps the point the caller actually gave in
+         ;; group 11. Reporting group 10 would mean create_text at (10,20) reads
+         ;; back as (5.53,19.10) — correct DXF, useless for round-tripping.
+         (setq just (+ (if (assoc 72 ent-data) (cdr (assoc 72 ent-data)) 0)
+                       (if (assoc 73 ent-data) (cdr (assoc 73 ent-data)) 0)))
+         (setq tpt (if (and (/= just 0) (assoc 11 ent-data))
+                     (cdr (assoc 11 ent-data))
+                     (cdr (assoc 10 ent-data))))
          (setq result (strcat result
            ",\"text\":\""    (mcp-escape-string (cdr (assoc 1 ent-data))) "\""
-           ",\"position\":"  (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"position\":"  (mcp-pt-json tpt)
            ",\"height\":"    (mcp-num-json (cdr (assoc 40 ent-data)) 0.0)
            ",\"rotation\":"  (mcp-deg-json (cdr (assoc 50 ent-data)))
+           ",\"h_justify\":" (itoa (if (assoc 72 ent-data) (cdr (assoc 72 ent-data)) 0))
+           ",\"v_justify\":" (itoa (if (assoc 73 ent-data) (cdr (assoc 73 ent-data)) 0))
            (if (assoc 2 ent-data)
              (strcat ",\"tag\":\"" (mcp-escape-string (cdr (assoc 2 ent-data))) "\"")
              ""))))

@@ -278,9 +278,18 @@ class EzdxfBackend(AutoCADBackend):
                 info["position"] = list(e.dxf.location)[:2]
             elif etype in ("TEXT", "ATTDEF", "ATTRIB"):
                 info["text"] = e.dxf.get("text", "")
-                info["position"] = list(e.dxf.insert)[:2]
+                # Justified text keeps the caller's point in align_point;
+                # insert holds the recomputed left-baseline equivalent.
+                halign = e.dxf.get("halign", 0)
+                valign = e.dxf.get("valign", 0)
+                if (halign or valign) and e.dxf.hasattr("align_point"):
+                    info["position"] = list(e.dxf.align_point)[:2]
+                else:
+                    info["position"] = list(e.dxf.insert)[:2]
                 info["height"] = e.dxf.get("height", 0.0)
                 info["rotation"] = e.dxf.get("rotation", 0.0)
+                info["h_justify"] = halign
+                info["v_justify"] = valign
                 if e.dxf.hasattr("tag"):
                     info["tag"] = e.dxf.tag
             elif etype == "MTEXT":

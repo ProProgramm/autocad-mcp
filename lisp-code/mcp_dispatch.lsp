@@ -33,16 +33,29 @@
   )
 )
 
-(defun mcp-load-modules ( / found missing path)
-  "Load each module from the support file search path.
+(defun mcp-find-module (m / direct)
+  "Locate a module file.
 
-   Modules are located with findfile rather than a hardcoded path so the repo
-   can live anywhere, which means this folder must be on the Support File
-   Search Path — the same requirement acaddoc.lsp already has. A module that
-   fails to load takes only its own commands down, not the whole dispatcher."
+   findfile resolves against the Support File Search Path, which is the
+   supported setup. But this file is also loaded by absolute path via APPLOAD,
+   and in that case its siblings are not necessarily on the search path — so
+   *mcp-lisp-dir*, if set, is tried first. Set it before loading this file:
+     (setq *mcp-lisp-dir* \"C:/path/to/lisp-code/\")"
+  (if *mcp-lisp-dir*
+    (progn
+      (setq direct (strcat *mcp-lisp-dir* m))
+      (if (findfile direct) direct (findfile m))
+    )
+    (findfile m)
+  )
+)
+
+(defun mcp-load-modules ( / found missing path)
+  "Load each module. A module that fails to load takes only its own commands
+   down, not the whole dispatcher."
   (setq found 0 missing "")
   (foreach m *mcp-modules*
-    (setq path (findfile m))
+    (setq path (mcp-find-module m))
     (if path
       (progn (load path) (setq found (1+ found)))
       (setq missing (strcat missing " " m))
@@ -50,9 +63,10 @@
   )
   (if (> (strlen missing) 0)
     (progn
-      (princ "\n*** MCP: modules not found on the support file search path:")
+      (princ "\n*** MCP: modules not found:")
       (princ missing)
-      (princ "\n*** Add the lisp-code folder under OPTIONS > Files > Support File Search Path.")
+      (princ "\n*** Add the lisp-code folder under OPTIONS > Files > Support File Search Path,")
+      (princ "\n*** or (setq *mcp-lisp-dir* \"C:/path/to/lisp-code/\") before loading this file.")
     )
   )
   found

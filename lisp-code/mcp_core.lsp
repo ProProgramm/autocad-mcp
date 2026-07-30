@@ -335,9 +335,14 @@
    stacking them, so this is safe to call repeatedly. It cannot rescue a
    broken core — dispatching this command already requires a working
    dispatcher — but it covers the ordinary edit-and-retry loop."
-  (setq path (findfile "mcp_dispatch.lsp"))
+  ;; Resolve the same way the loader does — it may have been loaded by
+  ;; absolute path, in which case findfile alone will not see it.
+  (setq path (if mcp-find-module
+               (mcp-find-module "mcp_dispatch.lsp")
+               (findfile "mcp_dispatch.lsp")))
   (if (not path)
-    (cons nil "mcp_dispatch.lsp not on the support file search path")
+    (cons nil (strcat "mcp_dispatch.lsp not found. Add lisp-code to the Support "
+                      "File Search Path, or set *mcp-lisp-dir* before loading it."))
     (progn
       (setq old-secureload (getvar "SECURELOAD"))
       (setvar "SECURELOAD" 0)

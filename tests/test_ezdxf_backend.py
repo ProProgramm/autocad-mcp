@@ -282,6 +282,14 @@ class TestEntityQuery:
         assert r.payload["position"] == [3.0, 4.0]
         assert r.payload["height"] == 2.5
 
+    async def test_entity_get_text_position_round_trips(self, backend):
+        """Justified text stores the requested point in align_point and a
+        recomputed one in insert; reporting insert would not round-trip."""
+        cr = await backend.create_text(10, 20, "Mast 42")
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["position"] == [10.0, 20.0]
+
     async def test_entity_get_text_preserves_umlauts(self, backend):
         cr = await backend.create_text(0, 0, "Stützpunkt Höhe")
         r = await backend.entity_get(cr.payload["handle"])
