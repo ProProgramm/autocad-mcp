@@ -66,45 +66,91 @@
   (cons T (strcat "{\"commands\":[" acc "],\"count\":" (itoa (length *mcp-commands*)) "}"))
 )
 
-(if (not ensure_layer_exists)
-  (defun ensure_layer_exists (name color linetype)
-    "Create layer if it doesn't exist."
-    (if (not (tblsearch "LAYER" name))
-      (command "_.-LAYER" "_NEW" name "_COLOR" color name "_LTYPE" linetype name "")
+;; These were guarded with (if (not <name>) ...) so an external utility library
+;; could supply its own. That also meant reload-modules could never replace
+;; them — they are already bound by the previous load, so the guard skips the
+;; new definition and a fix appears to do nothing until AutoCAD restarts.
+;; Defined unconditionally instead; load your own copy afterwards to override.
+
+(defun mcp-color-to-aci (color / n)
+  "Map a colour name or numeric string to an AutoCAD Color Index.
+
+   Mirrors the ezdxf backend's mapping so both backends interpret the same
+   input identically. Unknown names fall back to 7 (white), matching it."
+  (cond
+    ((not color) 7)
+    ((= (type color) 'INT) color)
+    ((setq n (atoi color))
+     ;; atoi returns 0 for non-numeric text, so only trust a leading digit.
+     (if (and (> (strlen color) 0)
+              (member (substr color 1 1) '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9")))
+       n
+       (mcp-color-name-to-aci color)))
+    (t (mcp-color-name-to-aci color))
+  )
+)
+
+(defun mcp-color-name-to-aci (color / hit)
+  (setq hit (assoc (strcase color)
+                   '(("RED" . 1) ("YELLOW" . 2) ("GREEN" . 3) ("CYAN" . 4)
+                     ("BLUE" . 5) ("MAGENTA" . 6) ("WHITE" . 7)
+                     ("GREY" . 8) ("GRAY" . 8))))
+  (if hit (cdr hit) 7)
+)
+
+(defun ensure_layer_exists (name color linetype / aci ltype)
+  "Create a layer if absent. Returns T when the layer exists afterwards.
+
+   entmake writes the layer table record directly. The previous version drove
+   (command \"_.-LAYER\" \"_NEW\" name \"_COLOR\" color name ...), whose prompt
+   sequence varies with drawing state — when it desynced the layer was created
+   but the colour was not applied, and the function failed with no message."
+  (setq aci (mcp-color-to-aci color))
+  ;; entmake rejects a linetype that is not loaded in this drawing. CONTINUOUS
+  ;; always exists, so fall back rather than fail; the caller is told.
+  (setq ltype (if (and linetype (tblsearch "LTYPE" linetype)) linetype "CONTINUOUS"))
+  (if (tblsearch "LAYER" name)
+    T
+    (if (entmake (list '(0 . "LAYER")
+                       '(100 . "AcDbSymbolTableRecord")
+                       '(100 . "AcDbLayerTableRecord")
+                       (cons 2 name)
+                       (cons 70 0)
+                       (cons 62 aci)
+                       (cons 6 ltype)))
+      T
+      nil
     )
   )
 )
 
-(if (not set_current_layer)
-  (defun set_current_layer (name)
-    "Set a layer as current."
-    (setvar "CLAYER" name)
-  )
+(defun set_current_layer (name)
+  "Set a layer as current."
+  (setvar "CLAYER" name)
 )
 
-(if (not set_attribute_value)
-  (defun set_attribute_value (ent tag value / sub-ent ent-data)
-    "Set an attribute value on a block insert by tag name."
-    (setq sub-ent (entnext ent))
-    (while sub-ent
-      (setq ent-data (entget sub-ent))
-      (if (and (= (cdr (assoc 0 ent-data)) "ATTRIB")
-               (= (strcase (cdr (assoc 2 ent-data))) (strcase tag)))
-        (progn
-          (entmod (subst (cons 1 value) (assoc 1 ent-data) ent-data))
-          (entupd sub-ent)
-          (setq sub-ent nil)  ; stop
-        )
-        (if (= (cdr (assoc 0 ent-data)) "SEQEND")
-          (setq sub-ent nil)
-          (setq sub-ent (entnext sub-ent))
-        )
+(defun set_attribute_value (ent tag value / sub-ent ent-data)
+  "Set an attribute value on a block insert by tag name."
+  (setq sub-ent (entnext ent))
+  (while sub-ent
+    (setq ent-data (entget sub-ent))
+    (if (and (= (cdr (assoc 0 ent-data)) "ATTRIB")
+             (= (strcase (cdr (assoc 2 ent-data))) (strcase tag)))
+      (progn
+        (entmod (subst (cons 1 value) (assoc 1 ent-data) ent-data))
+        (entupd sub-ent)
+        (setq sub-ent nil)  ; stop
+      )
+      (if (= (cdr (assoc 0 ent-data)) "SEQEND")
+        (setq sub-ent nil)
+        (setq sub-ent (entnext sub-ent))
       )
     )
   )
 )
 
 (defun mcp-write-result (filepath request-id ok-flag payload error-msg / fp)
+
   "Write a result JSON file. Atomic: write to .tmp then rename."
   (setq tmp-path (strcat filepath ".tmp"))
   (setq fp (open tmp-path "w"))
@@ -307,11 +353,18 @@
                 (setq result (cons nil (vl-catch-all-error-message result)))
               )
 
-              ;; Write result
+              ;; Write result. A handler that fails without a message would
+              ;; otherwise surface as ok:false with an empty string, which says
+              ;; nothing about what went wrong — name the command instead.
               (setq result-file (strcat *mcp-ipc-dir* "autocad_mcp_result_" request-id ".json"))
               (if (car result)
                 (mcp-write-result result-file request-id T (cdr result) nil)
-                (mcp-write-result result-file request-id nil nil (cdr result))
+                (mcp-write-result result-file request-id nil nil
+                  (if (and (cdr result) (= (type (cdr result)) 'STR) (> (strlen (cdr result)) 0))
+                    (cdr result)
+                    (strcat "Command '" cmd-name "' failed without an error message")
+                  )
+                )
               )
 
               (princ (strcat "\nMCP: Done " cmd-name))

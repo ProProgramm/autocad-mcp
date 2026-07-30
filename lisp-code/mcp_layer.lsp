@@ -48,14 +48,48 @@
                   "}"))
 )
 
-(defun mcp-cmd-layer-create (params / name color linetype)
+(defun mcp-layer-set-flag (name bit on / rec d flags)
+  "Set or clear a bit in a layer's flag group (70). Returns T on success.
+
+   entmod on the table record rather than (command \"_.-LAYER\" ...), whose
+   prompt sequence depends on drawing state and fails silently when it desyncs."
+  (setq rec (tblobjname "LAYER" name))
+  (if (not rec)
+    nil
+    (progn
+      (setq d (entget rec))
+      (setq flags (cdr (assoc 70 d)))
+      (setq flags (if on (logior flags bit) (logand flags (~ bit))))
+      (entmod (subst (cons 70 flags) (assoc 70 d) d))
+      T
+    )
+  )
+)
+
+(defun mcp-cmd-layer-create (params / name color linetype aci ltype fallback)
   (setq name (mcp-json-get-string params "name"))
-  (setq color (mcp-json-get-string params "color"))
-  (setq linetype (mcp-json-get-string params "linetype"))
-  (if (not color) (setq color "white"))
-  (if (not linetype) (setq linetype "CONTINUOUS"))
-  (ensure_layer_exists name color linetype)
-  (cons T (strcat "{\"name\":\"" name "\"}"))
+  (if (not name)
+    (cons nil "name is required")
+    (progn
+      (setq color (mcp-json-get-string params "color"))
+      (setq linetype (mcp-json-get-string params "linetype"))
+      (if (not linetype) (setq linetype "CONTINUOUS"))
+      (setq aci (mcp-color-to-aci color))
+      ;; A linetype that is not loaded in this drawing would make entmake fail
+      ;; outright; substituting CONTINUOUS and saying so beats refusing.
+      (setq fallback (not (tblsearch "LTYPE" linetype)))
+      (setq ltype (if fallback "CONTINUOUS" linetype))
+      (if (ensure_layer_exists name color ltype)
+        (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\""
+                        ",\"color\":" (itoa aci)
+                        ",\"linetype\":\"" (mcp-escape-string ltype) "\""
+                        ",\"linetype_fallback\":" (if fallback "true" "false")
+                        "}"))
+        (cons nil (strcat "Could not create layer " name
+                          " — entmake rejected the layer table record"))
+      )
+    )
+  )
 )
 
 (defun mcp-cmd-layer-set-current (params / name)
@@ -64,39 +98,93 @@
   (cons T (strcat "{\"current_layer\":\"" name "\"}"))
 )
 
-(defun mcp-cmd-layer-set-properties (params / name color linetype lineweight)
+(defun mcp-cmd-layer-set-properties (params / name color linetype lineweight
+                                            rec d applied)
   (setq name (mcp-json-get-string params "name"))
-  (setq color (mcp-json-get-string params "color"))
-  (setq linetype (mcp-json-get-string params "linetype"))
-  (setq lineweight (mcp-json-get-string params "lineweight"))
-  (if color (command "_.-LAYER" "_COLOR" color name ""))
-  (if linetype (command "_.-LAYER" "_LTYPE" linetype name ""))
-  (if lineweight (command "_.-LAYER" "_LWEIGHT" lineweight name ""))
-  (cons T (strcat "{\"name\":\"" name "\"}"))
+  (setq rec (if name (tblobjname "LAYER" name)))
+  (if (not rec)
+    (cons nil (strcat "Layer not found: " (if name name "(none given)")))
+    (progn
+      (setq color (mcp-json-get-string params "color"))
+      (setq linetype (mcp-json-get-string params "linetype"))
+      (setq lineweight (mcp-json-get-string params "lineweight"))
+      (setq d (entget rec) applied "")
+
+      (if color
+        (progn
+          (setq d (subst (cons 62 (mcp-color-to-aci color)) (assoc 62 d) d))
+          (setq applied (strcat applied "color "))
+        )
+      )
+      ;; Silently ignoring an unloaded linetype would report success while
+      ;; changing nothing, so refuse instead.
+      (if linetype
+        (if (tblsearch "LTYPE" linetype)
+          (progn
+            (setq d (subst (cons 6 linetype) (assoc 6 d) d))
+            (setq applied (strcat applied "linetype "))
+          )
+          (setq applied (strcat applied "[linetype-not-loaded] "))
+        )
+      )
+      (if lineweight
+        (progn
+          ;; Group 370 is hundredths of a millimetre, or -3 default / -2
+          ;; byblock / -1 bylayer.
+          (setq d (if (assoc 370 d)
+                    (subst (cons 370 (atoi lineweight)) (assoc 370 d) d)
+                    (append d (list (cons 370 (atoi lineweight))))))
+          (setq applied (strcat applied "lineweight "))
+        )
+      )
+
+      (if (entmod d)
+        (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\""
+                        ",\"applied\":\"" (vl-string-trim " " applied) "\"}"))
+        (cons nil (strcat "entmod rejected the change to layer " name))
+      )
+    )
+  )
 )
 
 (defun mcp-cmd-layer-freeze (params / name)
   (setq name (mcp-json-get-string params "name"))
-  (command "_.-LAYER" "_FREEZE" name "")
-  (cons T (strcat "{\"name\":\"" name "\",\"frozen\":true}"))
+  ;; AutoCAD refuses to freeze the current layer; entmod would let it through
+  ;; and leave the drawing in a state the UI cannot produce.
+  (cond
+    ((not (tblsearch "LAYER" name))
+     (cons nil (strcat "Layer not found: " name)))
+    ((= (strcase name) (strcase (getvar "CLAYER")))
+     (cons nil (strcat "Cannot freeze the current layer (" name
+                       ") — set another layer current first")))
+    ((mcp-layer-set-flag name 1 T)
+     (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"frozen\":true}")))
+    (t (cons nil (strcat "Could not freeze layer " name)))
+  )
 )
 
 (defun mcp-cmd-layer-thaw (params / name)
   (setq name (mcp-json-get-string params "name"))
-  (command "_.-LAYER" "_THAW" name "")
-  (cons T (strcat "{\"name\":\"" name "\",\"frozen\":false}"))
+  (if (mcp-layer-set-flag name 1 nil)
+    (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"frozen\":false}"))
+    (cons nil (strcat "Layer not found: " name))
+  )
 )
 
 (defun mcp-cmd-layer-lock (params / name)
   (setq name (mcp-json-get-string params "name"))
-  (command "_.-LAYER" "_LOCK" name "")
-  (cons T (strcat "{\"name\":\"" name "\",\"locked\":true}"))
+  (if (mcp-layer-set-flag name 4 T)
+    (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"locked\":true}"))
+    (cons nil (strcat "Layer not found: " name))
+  )
 )
 
 (defun mcp-cmd-layer-unlock (params / name)
   (setq name (mcp-json-get-string params "name"))
-  (command "_.-LAYER" "_UNLOCK" name "")
-  (cons T (strcat "{\"name\":\"" name "\",\"locked\":false}"))
+  (if (mcp-layer-set-flag name 4 nil)
+    (cons T (strcat "{\"name\":\"" (mcp-escape-string name) "\",\"locked\":false}"))
+    (cons nil (strcat "Layer not found: " name))
+  )
 )
 
 ;; --- command registration ---
