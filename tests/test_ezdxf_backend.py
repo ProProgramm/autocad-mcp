@@ -383,6 +383,48 @@ class TestLayerOperations:
         names = [l["name"] for l in r.payload["layers"]]
         assert "0" in names  # Default layer always present
 
+    async def test_block_extract_returns_attributes_in_one_call(self, backend):
+        await backend.block_define("MAST", [{"type": "LINE", "x1": 0, "y1": 0, "x2": 1, "y2": 0}])
+        await backend.block_insert_with_attributes(
+            "MAST", 10, 20, attributes={"MNR": "A zu 202", "KM": "23.7775"}
+        )
+        await backend.block_insert_with_attributes(
+            "MAST", 30, 40, attributes={"MNR": "A zu 222", "KM": "24.0215"}
+        )
+        r = await backend.block_extract(name="mast")
+        assert r.ok
+        assert r.payload["total"] == 2
+        found = {b["attribs"].get("MNR") for b in r.payload["blocks"]}
+        assert found == {"A zu 202", "A zu 222"}
+
+    async def test_block_extract_limits_tags(self, backend):
+        await backend.block_define("MAST", [{"type": "LINE", "x1": 0, "y1": 0, "x2": 1, "y2": 0}])
+        await backend.block_insert_with_attributes(
+            "MAST", 10, 20, attributes={"MNR": "A zu 202", "KM": "23.7775", "TYP": "BS013"}
+        )
+        r = await backend.block_extract(tags=["mnr"])
+        assert r.ok
+        assert r.payload["blocks"][0]["attribs"] == {"MNR": "A zu 202"}
+
+    async def test_block_extract_filters_by_bbox(self, backend):
+        await backend.block_define("MAST", [{"type": "LINE", "x1": 0, "y1": 0, "x2": 1, "y2": 0}])
+        await backend.block_insert_with_attributes("MAST", 10, 20, attributes={"MNR": "near"})
+        await backend.block_insert_with_attributes("MAST", 9000, 9000, attributes={"MNR": "far"})
+        r = await backend.block_extract(bbox=[0, 0, 100, 100])
+        assert r.ok
+        assert r.payload["total"] == 1
+        assert r.payload["blocks"][0]["attribs"]["MNR"] == "near"
+
+    async def test_block_extract_caps_and_reports_total(self, backend):
+        await backend.block_define("MAST", [{"type": "LINE", "x1": 0, "y1": 0, "x2": 1, "y2": 0}])
+        for i in range(5):
+            await backend.block_insert_with_attributes("MAST", i, 0, attributes={"MNR": str(i)})
+        r = await backend.block_extract(limit=2)
+        assert r.ok
+        assert r.payload["returned"] == 2
+        assert r.payload["total"] == 5
+        assert r.payload["truncated"] is True
+
     async def test_layer_list_filters_by_substring(self, backend):
         await backend.layer_create("FS_N_ALG_Weichenbloecke_BL_Wiv")
         await backend.layer_create("IB_L_ALG_Titelblatt_BL_EBP")

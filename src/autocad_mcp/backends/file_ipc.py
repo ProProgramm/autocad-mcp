@@ -474,6 +474,22 @@ class FileIPCBackend(AutoCADBackend):
     async def block_update_attribute(self, entity_id, tag, value) -> CommandResult:
         return await self._dispatch("block-update-attribute", {"entity_id": entity_id, "tag": tag, "value": value})
 
+    async def block_extract(
+        self, layer=None, name=None, tags=None, bbox=None, limit=None, offset=None
+    ) -> CommandResult:
+        params = {
+            "layer": layer,
+            "name": name,
+            "tags": ",".join(tags) if tags else None,
+            "limit": limit,
+            "offset": offset,
+        }
+        if bbox:
+            if len(bbox) != 4:
+                return CommandResult(ok=False, error="bbox must be [x1, y1, x2, y2]")
+            params.update({"bx1": bbox[0], "by1": bbox[1], "bx2": bbox[2], "by2": bbox[3]})
+        return await self._dispatch("block-extract", params)
+
     async def block_define(self, name, entities) -> CommandResult:
         return await self._dispatch("block-define", {"name": name, "entities": entities})
 

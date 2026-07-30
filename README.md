@@ -152,12 +152,33 @@ set.
 
 | Operation | File IPC | ezdxf |
 |-----------|----------|-------|
+| `extract` | Yes | Yes |
 | `list` | Yes | Yes |
 | `insert` | Yes | Yes |
 | `insert_with_attributes` | Yes | Yes |
 | `get_attributes` | Yes | Yes |
 | `update_attribute` | Yes | Yes |
 | `define` | No | Yes |
+
+`extract` bulk-reads blocks with their attributes in a single round trip. Use it
+instead of looping `get_attributes`, which costs one dispatch per block — a few
+hundred blocks turns into minutes of IPC. `data` accepts:
+
+| Field | Effect |
+|---|---|
+| `layer` | Exact layer match |
+| `name` | Case-insensitive substring of the block name, **resolved through dynamic-block instances** — an instance stored as `*U222` matches its real name `BS013` |
+| `tags` | `["MNR","KM"]` to return only those attributes rather than all of them |
+| `bbox` | `[x1, y1, x2, y2]` on the insertion point |
+| `limit` / `offset` | Cap (default 100) and paging; `total` is always reported |
+
+Cheap filters run before the expensive work — effective-name resolution costs an
+ActiveX call and attribute reading walks sub-entities — so a scoped query stays
+well inside the IPC timeout. Measured on a 4,539-block drawing: a layer-scoped
+extract of 292 blocks with two tags takes ~0.3 s.
+
+> Dynamic block name resolution needs ActiveX, which AutoCAD LT lacks. On LT the
+> raw `*U###` name is returned instead.
 
 ### `annotation` — Text, dimensions, leaders
 
@@ -251,6 +272,8 @@ xref-assembled drawing with 11,271 entities and 4,169 layers.
 
 - **Non-ASCII text is no longer corrupted on the way in** — commands were serialized with `json.dumps` defaults, so `ü` reached the LISP side as the six literal characters `ü`, which its JSON parser has no way to decode. A layer filter for `Weichenblöcke` matched nothing; created text carried visible escapes. Commands are now written in the ANSI codepage AutoLISP actually reads (`AUTOCAD_MCP_IPC_ENCODING`, default `cp1252`), as are `execute_lisp` temp files. Characters outside that codepage produce a clear error instead of silent corruption. Reading was already correct.
 - **`annotation.create_text` works** — it drove the `_TEXT` command positionally, which desyncs whenever the current text style has a fixed height (the height prompt is skipped) and leaves the command open waiting for further lines. It failed with an empty error message for every input. Now uses `entmake`.
+- **`block.extract`** — bulk-reads blocks with their attributes in one round trip, filtered by layer, block name, bbox and tag. The per-entity path costs a dispatch each, so building an attribute list from a few hundred blocks was a minutes-long loop; it is now a single ~0.3 s call. Block names are resolved through dynamic-block instances, without which a name filter silently misses every block whose parameters differ from its definition — on the test drawing that was most of them.
+- **`block_insert_with_attributes` no longer drops attributes** (ezdxf backend) — `add_auto_attribs` fills ATTDEF templates declared in the block definition and neither raises nor adds anything for a block without them, so the fallback in the `except` branch never ran and the caller's data vanished silently.
 - **Bounded `drawing.info` and `layer.list`** — `drawing.info` emitted every layer name: 330 KB on a 4,169-layer drawing, larger than most clients accept. It now reports `layer_count` with a 25-name sample. `layer.list` takes `filter` (case-insensitive substring), `limit` and `offset`, which is the only practical way to find a layer among thousands.
 
 - **Bounded `entity.list`** — `limit` (default 200), `offset`, `type` and `bbox` filters, with `total` and `truncated` always reported. Previously the command walked the whole database and concatenated one JSON object per entity, which on a 10k-entity drawing exceeded both the IPC timeout and the client's token budget, with no signal that anything had been dropped.

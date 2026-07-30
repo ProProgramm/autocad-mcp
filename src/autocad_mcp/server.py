@@ -271,6 +271,20 @@ async def block(
     """Block definition, insertion, and attribute management.
 
     Operations:
+      extract              — Bulk-read blocks WITH their attributes in one call.
+                             data: {layer?, name?, tags?, bbox?, limit?, offset?}
+                             Prefer this over looping get_attributes: that costs
+                             one round trip per block, so a few hundred blocks
+                             takes minutes. Returns handle, resolved block name,
+                             layer, position, rotation and attributes, capped at
+                             `limit` (default 100) with `total` reported.
+                               name  — case-insensitive substring of the block
+                                       name, resolved through dynamic-block
+                                       instances (an instance stored as *U222
+                                       matches its real name)
+                               tags  — ["MNR","KM"] to return only those
+                                       attributes instead of all of them
+                               bbox  — [x1, y1, x2, y2] on the insertion point
       list                 — List all block definitions.
       insert               — data: {name, x, y, scale?, rotation?, block_id?}
       insert_with_attributes — data: {name, x, y, scale?, rotation?, attributes: {tag: value}}
@@ -281,7 +295,16 @@ async def block(
     data = data or {}
     backend = await get_backend()
 
-    if operation == "list":
+    if operation == "extract":
+        result = await backend.block_extract(
+            layer=data.get("layer"),
+            name=data.get("name"),
+            tags=data.get("tags"),
+            bbox=data.get("bbox"),
+            limit=data.get("limit"),
+            offset=data.get("offset"),
+        )
+    elif operation == "list":
         result = await backend.block_list()
     elif operation == "insert":
         result = await backend.block_insert(

@@ -383,6 +383,9 @@
     ((= cmd-name "block-update-attribute")
      (mcp-cmd-block-update-attribute params-json))
 
+    ((= cmd-name "block-extract")
+     (mcp-cmd-block-extract params-json))
+
     ((= cmd-name "block-define")
      (cons nil "block-define not available via IPC (use ezdxf backend)"))
 
@@ -454,6 +457,156 @@
                   ",\"layer_count\":" (itoa layer-count)
                   ",\"layers\":[" layer-list "]"
                   ",\"layers_truncated\":" (if (> layer-count 25) "true" "false")
+                  "}"))
+)
+
+;; -----------------------------------------------------------------------
+;; Bulk block/attribute extraction
+;; -----------------------------------------------------------------------
+
+(setq *mcp-effname-cache* '())
+
+(defun mcp-effective-name (ent raw / cached res)
+  "Resolve a dynamic block instance to the name the drafter knows.
+
+   A dynamic block whose parameters differ from the definition is stored under
+   an anonymous name like *U222; the real name (BS013) lives on the ActiveX
+   object. Without this, filtering by block name silently misses most blocks in
+   a drawing that uses dynamic blocks. Falls back to the raw name on AutoCAD LT,
+   which has no ActiveX. Cached: each anonymous name maps to exactly one
+   definition, and they repeat heavily."
+  (if (/= "*" (substr raw 1 1))
+    raw
+    (progn
+      (setq cached (assoc raw *mcp-effname-cache*))
+      (if cached
+        (cdr cached)
+        (progn
+          (setq res (vl-catch-all-apply
+                      '(lambda () (vla-get-EffectiveName (vlax-ename->vla-object ent)))))
+          (if (or (vl-catch-all-error-p res) (/= (type res) 'STR))
+            (setq res raw)
+          )
+          (setq *mcp-effname-cache* (cons (cons raw res) *mcp-effname-cache*))
+          res
+        )
+      )
+    )
+  )
+)
+
+(defun mcp-attribs-json (ent tags / s sd out tag)
+  "Serialize an INSERT's attributes as a JSON object body.
+
+   Only call this when group 66 says attributes follow — otherwise entnext
+   walks into the next drawing entity rather than a sub-entity."
+  (setq out "" s (entnext ent))
+  (while (and s (/= "SEQEND" (cdr (assoc 0 (setq sd (entget s))))))
+    (if (= "ATTRIB" (cdr (assoc 0 sd)))
+      (progn
+        (setq tag (cdr (assoc 2 sd)))
+        (if (or (not tags) (member (strcase tag) tags))
+          (progn
+            (if (> (strlen out) 0) (setq out (strcat out ",")))
+            (setq out (strcat out "\"" (mcp-escape-string tag) "\":\""
+                              (mcp-escape-string (cdr (assoc 1 sd))) "\""))
+          )
+        )
+      )
+    )
+    (setq s (entnext s))
+  )
+  out
+)
+
+(defun mcp-cmd-block-extract (params / layer name-filter tags tags-str limit offset
+                                     bx1 by1 bx2 by2 use-bbox tmp
+                                     e d raw eff pt acc total emitted attrs)
+  "Read blocks and their attributes in one round trip.
+
+   This exists because the per-entity path costs an IPC round trip each: a
+   drawing with 824 attributed blocks would need 824 dispatches to build a
+   Fundamentdatenliste. Cheap filters (layer, bbox) are applied before the
+   expensive work — effective-name resolution costs an ActiveX call and
+   attribute reading walks sub-entities — so a scoped query stays well inside
+   the IPC timeout even on a large drawing."
+  (vl-load-com)
+  (setq layer       (mcp-json-get-string params "layer"))
+  (setq name-filter (mcp-json-get-string params "name"))
+  (setq tags-str    (mcp-json-get-string params "tags"))
+  (setq limit       (mcp-json-get-number params "limit"))
+  (setq offset      (mcp-json-get-number params "offset"))
+  (setq bx1 (mcp-json-get-number params "bx1")
+        by1 (mcp-json-get-number params "by1")
+        bx2 (mcp-json-get-number params "bx2")
+        by2 (mcp-json-get-number params "by2"))
+
+  (if limit  (setq limit  (fix limit))  (setq limit 100))
+  (if offset (setq offset (fix offset)) (setq offset 0))
+  (if (< limit 0)  (setq limit 0))
+  (if (< offset 0) (setq offset 0))
+  (if name-filter (setq name-filter (strcase name-filter)))
+  (if tags-str
+    (setq tags (mapcar '(lambda (s) (strcase (vl-string-trim " " s)))
+                       (mcp-split-string tags-str ",")))
+  )
+
+  (setq use-bbox (and bx1 by1 bx2 by2))
+  (if use-bbox
+    (progn
+      (if (> bx1 bx2) (progn (setq tmp bx1) (setq bx1 bx2) (setq bx2 tmp)))
+      (if (> by1 by2) (progn (setq tmp by1) (setq by1 by2) (setq by2 tmp)))
+    )
+  )
+
+  (setq acc "" total 0 emitted 0 e (entnext))
+  (while e
+    (setq d (entget e))
+    (if (= "INSERT" (cdr (assoc 0 d)))
+      (progn
+        (setq pt (cdr (assoc 10 d)))
+        ;; Cheap filters first — they decide most entities without ActiveX.
+        (if (and (or (not layer) (= (cdr (assoc 8 d)) layer))
+                 (or (not use-bbox)
+                     (and pt (>= (car pt) bx1) (<= (car pt) bx2)
+                              (>= (cadr pt) by1) (<= (cadr pt) by2))))
+          (progn
+            (setq raw (cdr (assoc 2 d)))
+            (setq eff (if name-filter (mcp-effective-name e raw) nil))
+            (if (or (not name-filter) (vl-string-search name-filter (strcase eff)))
+              (progn
+                (setq total (1+ total))
+                (if (and (> total offset) (< emitted limit))
+                  (progn
+                    (if (not eff) (setq eff (mcp-effective-name e raw)))
+                    (setq attrs
+                      (if (and (assoc 66 d) (= 1 (cdr (assoc 66 d))))
+                        (mcp-attribs-json e tags)
+                        ""))
+                    (if (> (strlen acc) 0) (setq acc (strcat acc ",")))
+                    (setq acc (strcat acc
+                      "{\"handle\":\"" (cdr (assoc 5 d))
+                      "\",\"name\":\"" (mcp-escape-string eff)
+                      "\",\"layer\":\"" (mcp-escape-string (cdr (assoc 8 d))) "\""
+                      (if pt (strcat ",\"pt\":[" (rtos (car pt) 2 3) "," (rtos (cadr pt) 2 3) "]") "")
+                      ",\"rotation\":" (mcp-deg-json (cdr (assoc 50 d)))
+                      ",\"attribs\":{" attrs "}}"))
+                    (setq emitted (1+ emitted))
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (setq e (entnext e))
+  )
+  (cons T (strcat "{\"blocks\":[" acc "]"
+                  ",\"returned\":" (itoa emitted)
+                  ",\"offset\":" (itoa offset)
+                  ",\"total\":" (itoa total)
+                  ",\"truncated\":" (if (> total (+ offset emitted)) "true" "false")
                   "}"))
 )
 

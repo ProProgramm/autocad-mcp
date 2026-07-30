@@ -553,16 +553,18 @@ class EzdxfBackend(AutoCADBackend):
             "rotation": rotation,
         })
         if attributes:
-            # Try add_auto_attribs first (uses ATTDEF templates)
+            # add_auto_attribs fills ATTDEF templates declared in the block
+            # definition. For a block without them it neither raises nor adds
+            # anything, so the old except-branch fallback never ran and the
+            # caller's data was dropped in silence. Add whatever it missed.
             try:
                 e.add_auto_attribs(attributes)
             except Exception:
-                # Fallback: add manual attribs
-                for tag, value in attributes.items():
-                    try:
-                        e.add_attrib(tag, value, (x, y))
-                    except Exception:
-                        pass
+                pass
+            existing = {a.dxf.tag.upper() for a in e.attribs}
+            for tag, value in attributes.items():
+                if tag.upper() not in existing:
+                    e.add_attrib(tag, value, (x, y))
         return CommandResult(ok=True, payload={"entity_type": "INSERT", "handle": e.dxf.handle})
 
     async def block_get_attributes(self, entity_id) -> CommandResult:
@@ -589,6 +591,60 @@ class EzdxfBackend(AutoCADBackend):
             return CommandResult(ok=False, error=f"Attribute '{tag}' not found")
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
+
+    async def block_extract(
+        self, layer=None, name=None, tags=None, bbox=None, limit=None, offset=None
+    ) -> CommandResult:
+        """Bulk-read blocks with their attributes, matching the IPC backend."""
+        limit = 100 if limit is None else max(0, int(limit))
+        offset = 0 if offset is None else max(0, int(offset))
+        needle = name.upper() if name else None
+        wanted = {t.strip().upper() for t in tags} if tags else None
+
+        if bbox:
+            if len(bbox) != 4:
+                return CommandResult(ok=False, error="bbox must be [x1, y1, x2, y2]")
+            bx1, bx2 = sorted((bbox[0], bbox[2]))
+            by1, by2 = sorted((bbox[1], bbox[3]))
+
+        blocks = []
+        total = 0
+        for e in self._msp.query("INSERT"):
+            if layer and e.dxf.get("layer", "0") != layer:
+                continue
+            pt = (e.dxf.insert[0], e.dxf.insert[1])
+            if bbox and not (bx1 <= pt[0] <= bx2 and by1 <= pt[1] <= by2):
+                continue
+            # No ActiveX here, so anonymous dynamic-block instances keep their
+            # *U### name unless a future ezdxf exposes a resolver. Headless DXF
+            # work rarely involves them; the IPC backend does the real resolving.
+            ename = getattr(e, "dxf_name_effective", None) or e.dxf.name
+            if needle and needle not in ename.upper():
+                continue
+
+            total += 1
+            if total > offset and len(blocks) < limit:
+                attribs = {
+                    a.dxf.tag: a.dxf.text
+                    for a in e.attribs
+                    if wanted is None or a.dxf.tag.upper() in wanted
+                }
+                blocks.append({
+                    "handle": e.dxf.handle,
+                    "name": ename,
+                    "layer": e.dxf.get("layer", "0"),
+                    "pt": [round(pt[0], 3), round(pt[1], 3)],
+                    "rotation": e.dxf.get("rotation", 0.0),
+                    "attribs": attribs,
+                })
+
+        return CommandResult(ok=True, payload={
+            "blocks": blocks,
+            "returned": len(blocks),
+            "offset": offset,
+            "total": total,
+            "truncated": total > offset + len(blocks),
+        })
 
     async def block_define(self, name, entities) -> CommandResult:
         block = self._doc.blocks.new(name=name)
