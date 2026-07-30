@@ -183,7 +183,19 @@ class FileIPCBackend(AutoCADBackend):
                         pass  # File may be partially written, retry
                 await asyncio.sleep(POLL_INTERVAL)
 
-            return CommandResult(ok=False, error=f"Timeout waiting for result (request_id={request_id})")
+            lisp_path = str(LISP_DIR / "mcp_dispatch.lsp").replace("\\", "/")
+            return CommandResult(
+                ok=False,
+                error=(
+                    f"Timeout after {TIMEOUT:g}s waiting for result (request_id={request_id}). "
+                    "Common causes: (a) the drawing was switched or reopened, so the dispatcher "
+                    "is not defined in this document's LISP namespace — reload it with "
+                    f'(load "{lisp_path}") or install lisp-code/acaddoc.lsp to auto-load it; '
+                    "(b) AutoCAD is showing a modal dialog — dismiss it; "
+                    "(c) the command was too heavy for the timeout — scope it down or raise "
+                    "AUTOCAD_MCP_IPC_TIMEOUT."
+                ),
+            )
 
         finally:
             # Cleanup
@@ -337,8 +349,14 @@ class FileIPCBackend(AutoCADBackend):
     async def create_hatch(self, entity_id, pattern="ANSI31") -> CommandResult:
         return await self._dispatch("create-hatch", {"entity_id": entity_id, "pattern": pattern})
 
-    async def entity_list(self, layer=None) -> CommandResult:
-        return await self._dispatch("entity-list", {"layer": layer})
+    async def entity_list(self, layer=None, etype=None, limit=None, offset=None, bbox=None) -> CommandResult:
+        params = {"layer": layer, "type": etype, "limit": limit, "offset": offset}
+        if bbox:
+            if len(bbox) != 4:
+                return CommandResult(ok=False, error="bbox must be [x1, y1, x2, y2]")
+            params.update({"bx1": bbox[0], "by1": bbox[1], "bx2": bbox[2], "by2": bbox[3]})
+        # None values are stripped in _dispatch, letting the LISP defaults apply
+        return await self._dispatch("entity-list", params)
 
     async def entity_count(self, layer=None) -> CommandResult:
         return await self._dispatch("entity-count", {"layer": layer})

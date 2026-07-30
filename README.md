@@ -9,7 +9,7 @@ Two backends, one API:
 | **File IPC** | Windows Python | Yes — AutoCAD LT 2024+ (Windows) | Win32 PrintWindow |
 | **ezdxf** | Any platform | No (headless) | matplotlib render |
 
-The server exposes **8 consolidated tools** (`drawing`, `entity`, `layer`, `block`, `annotation`, `pid`, `view`, `system`) over the MCP stdio transport. An MCP client (Claude Desktop, Claude Code, etc.) connects and drives AutoCAD through natural-language requests.
+The server exposes **9 consolidated tools** (`drawing`, `entity`, `layer`, `block`, `annotation`, `pid`, `view`, `system`, `execute_lisp`) over the MCP stdio transport. An MCP client (Claude Desktop, Claude Code, etc.) connects and drives AutoCAD through natural-language requests.
 
 ## Prerequisites (File IPC backend)
 
@@ -32,14 +32,26 @@ uv sync
 
 ### 2. Load the LISP dispatcher in AutoCAD LT
 
-Open AutoCAD LT and load `mcp_dispatch.lsp` using **APPLOAD**:
+**Recommended — auto-load into every drawing.** AutoLISP definitions live in a
+per-document namespace, so a dispatcher loaded by hand exists only in the drawing
+that was open at the time. Open or switch drawings and the server goes silent
+until you reload. `acaddoc.lsp` avoids this by loading once per document:
+
+1. **OPTIONS > Files > Support File Search Path** — add `<repo>/lisp-code`
+2. **OPTIONS > Files > Trusted Locations** — add the same folder
+   (without this, SECURELOAD blocks the load with a modal dialog, which also
+   blocks the IPC channel)
+3. Restart AutoCAD
+
+**Manual alternative — APPLOAD:**
 
 1. Type `APPLOAD` in the AutoCAD command line
 2. Browse to `<repo>/lisp-code/mcp_dispatch.lsp`
 3. Click **Load**
-4. You should see: `=== MCP Dispatch v3.1 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
+4. You should see: `=== MCP Dispatch v3.2 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
 
-> **Tip:** Add the file to your AutoCAD Startup Suite (in the APPLOAD dialog) so it loads automatically with every drawing.
+> Startup Suite has the same per-document limitation in multi-document sessions;
+> prefer `acaddoc.lsp` if you work across several drawings.
 
 ### 3. Configure your MCP client
 
@@ -112,6 +124,22 @@ You should see `backend: "file_ipc"` if AutoCAD is running, or `backend: "ezdxf"
 
 **Read:** `list`, `count`, `get`
 
+`list` is bounded. It returns at most `limit` entities (default 200) alongside
+`total`, the number of matches, so a truncated result is never mistaken for a
+complete one. Scope the query before running it on a large drawing:
+
+| `data` field | Effect |
+|---|---|
+| `type` | `"INSERT"` or `"INSERT,TEXT"` — filter by DXF type |
+| `bbox` | `[x1, y1, x2, y2]` — keep entities whose base point is inside the window (any two opposite corners) |
+| `limit` | Max entities returned; `0` returns just the count |
+| `offset` | Page through matches beyond the first `limit` |
+
+`get` returns geometry for LINE, CIRCLE, ARC, ELLIPSE, POINT, TEXT/ATTDEF/ATTRIB,
+MTEXT, INSERT, and LWPOLYLINE/POLYLINE. Angles come back in degrees, matching the
+create/rotate operations. Vertex lists are capped at 200 with `vertices_truncated`
+set.
+
 **Modify:** `copy`, `move`, `rotate`, `scale`, `mirror`, `offset`\*, `array`, `fillet`\*, `chamfer`\*, `erase`
 
 > \* `offset`, `fillet`, `chamfer` are File IPC only (not supported in ezdxf headless backend).
@@ -153,9 +181,20 @@ Screenshots use `PrintWindow` (Win32) for the File IPC backend — works even wh
 
 ### `system` — Server management
 
-`status`, `health`, `get_backend`, `runtime`, `init`, `execute_lisp`
+`status`, `health`, `get_backend`, `runtime`, `init`
 
-> `execute_lisp` runs arbitrary AutoLISP code (File IPC only). Pass `data: {code: "(+ 1 2)"}`. This turns the server into an extensible automation platform — any valid AutoLISP expression can be executed.
+Read-only. Annotated as such, so clients may auto-approve it.
+
+### `execute_lisp` — Arbitrary AutoLISP
+
+Runs any AutoLISP expression in the current drawing (File IPC only). Pass
+`code: "(+ 1 2)"`. This is what makes the server extensible rather than a fixed
+command set.
+
+> It is a separate tool, not a `system` operation, because it can erase entities,
+> write files, and change system variables. Keeping it out of the read-only tool
+> means a client that auto-approves `system` does not thereby auto-approve
+> arbitrary code execution.
 
 ## Architecture
 
@@ -204,6 +243,16 @@ AutoLISP was added to AutoCAD LT in the **2024 release (Windows only)**. AutoCAD
 | Selection sets | AutoLISP on Mac |
 
 The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
+
+## What's New in v3.2
+
+Fixes for working on large, real-world drawings.
+
+- **Bounded `entity.list`** — `limit` (default 200), `offset`, `type` and `bbox` filters, with `total` and `truncated` always reported. Previously the command walked the whole database and concatenated one JSON object per entity, which on a 10k-entity drawing exceeded both the IPC timeout and the client's token budget, with no signal that anything had been dropped.
+- **`entity.get` covers real entity types** — ARC, ELLIPSE, POINT, TEXT/ATTDEF/ATTRIB, MTEXT, INSERT and LWPOLYLINE/POLYLINE in addition to LINE and CIRCLE. Block names, insertion points, text content and polyline vertices are now readable; before, everything but LINE and CIRCLE returned only type/handle/layer. Angles are converted to degrees so they round-trip through the create/rotate operations.
+- **`execute_lisp` split out of `system`** — `system` was annotated `readOnlyHint: true` while containing arbitrary code execution, so a client honouring the annotation could auto-approve a call that erases the drawing. `execute_lisp` is now its own tool with `destructiveHint: true`; `system` is genuinely read-only.
+- **`acaddoc.lsp` auto-load** — loads the dispatcher into every document namespace. Fixes the server going silent after `drawing.open` or any manual drawing switch, since an APPLOAD-loaded dispatcher exists only in the document that was open at the time.
+- **Actionable timeout errors** — the timeout message now names the likely cause and the exact reload command instead of only the request id.
 
 ## What's New in v3.1
 

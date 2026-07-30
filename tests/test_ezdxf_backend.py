@@ -146,7 +146,7 @@ class TestEntityQuery:
     async def test_entity_list_empty(self, backend):
         r = await backend.entity_list()
         assert r.ok
-        assert r.payload["count"] == 0
+        assert r.payload["total"] == 0
         assert r.payload["entities"] == []
 
     async def test_entity_list_after_create(self, backend):
@@ -154,7 +154,9 @@ class TestEntityQuery:
         await backend.create_circle(5, 5, 3)
         r = await backend.entity_list()
         assert r.ok
-        assert r.payload["count"] == 2
+        assert r.payload["total"] == 2
+        assert r.payload["returned"] == 2
+        assert r.payload["truncated"] is False
 
     async def test_entity_list_by_layer(self, backend):
         await backend.create_line(0, 0, 10, 10, layer="A")
@@ -162,7 +164,70 @@ class TestEntityQuery:
         await backend.create_circle(5, 5, 3, layer="A")
         r = await backend.entity_list(layer="A")
         assert r.ok
-        assert r.payload["count"] == 2
+        assert r.payload["total"] == 2
+
+    async def test_entity_list_by_type(self, backend):
+        await backend.create_line(0, 0, 10, 10)
+        await backend.create_circle(5, 5, 3)
+        await backend.create_circle(9, 9, 1)
+        r = await backend.entity_list(etype="CIRCLE")
+        assert r.ok
+        assert r.payload["total"] == 2
+        assert {e["type"] for e in r.payload["entities"]} == {"CIRCLE"}
+
+    async def test_entity_list_by_multiple_types(self, backend):
+        await backend.create_line(0, 0, 10, 10)
+        await backend.create_circle(5, 5, 3)
+        await backend.create_text(1, 1, "M42")
+        r = await backend.entity_list(etype="circle, text")
+        assert r.ok
+        assert r.payload["total"] == 2
+
+    async def test_entity_list_limit_truncates_but_reports_total(self, backend):
+        for i in range(5):
+            await backend.create_circle(i, 0, 1)
+        r = await backend.entity_list(limit=2)
+        assert r.ok
+        assert r.payload["returned"] == 2
+        assert r.payload["total"] == 5
+        assert r.payload["truncated"] is True
+
+    async def test_entity_list_limit_zero_counts_without_data(self, backend):
+        for i in range(3):
+            await backend.create_circle(i, 0, 1)
+        r = await backend.entity_list(limit=0)
+        assert r.ok
+        assert r.payload["entities"] == []
+        assert r.payload["total"] == 3
+
+    async def test_entity_list_offset_pages_through_matches(self, backend):
+        for i in range(5):
+            await backend.create_circle(i, 0, 1)
+        first = await backend.entity_list(limit=2)
+        second = await backend.entity_list(limit=2, offset=2)
+        assert first.ok and second.ok
+        assert second.payload["returned"] == 2
+        first_handles = {e["handle"] for e in first.payload["entities"]}
+        second_handles = {e["handle"] for e in second.payload["entities"]}
+        assert first_handles.isdisjoint(second_handles)
+
+    async def test_entity_list_bbox_filters_on_base_point(self, backend):
+        await backend.create_circle(5, 5, 1)
+        await backend.create_circle(500, 500, 1)
+        r = await backend.entity_list(bbox=[0, 0, 10, 10])
+        assert r.ok
+        assert r.payload["total"] == 1
+
+    async def test_entity_list_bbox_accepts_opposite_corners(self, backend):
+        await backend.create_circle(5, 5, 1)
+        r = await backend.entity_list(bbox=[10, 10, 0, 0])
+        assert r.ok
+        assert r.payload["total"] == 1
+
+    async def test_entity_list_bbox_rejects_wrong_length(self, backend):
+        r = await backend.entity_list(bbox=[0, 0, 10])
+        assert not r.ok
+        assert "bbox" in r.error
 
     async def test_entity_count(self, backend):
         await backend.create_line(0, 0, 10, 10)
@@ -199,6 +264,46 @@ class TestEntityQuery:
     async def test_entity_get_not_found(self, backend):
         r = await backend.entity_get("NONEXISTENT")
         assert not r.ok
+
+    async def test_entity_get_arc(self, backend):
+        cr = await backend.create_arc(10, 10, 5, 0, 90)
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["center"] == [10.0, 10.0]
+        assert r.payload["radius"] == 5.0
+        assert r.payload["start_angle"] == 0.0
+        assert r.payload["end_angle"] == 90.0
+
+    async def test_entity_get_text_returns_content(self, backend):
+        cr = await backend.create_text(3, 4, "Mast 42", height=2.5)
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["text"] == "Mast 42"
+        assert r.payload["position"] == [3.0, 4.0]
+        assert r.payload["height"] == 2.5
+
+    async def test_entity_get_text_preserves_umlauts(self, backend):
+        cr = await backend.create_text(0, 0, "Stützpunkt Höhe")
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["text"] == "Stützpunkt Höhe"
+
+    async def test_entity_get_polyline_returns_vertices(self, backend):
+        cr = await backend.create_polyline([[0, 0], [10, 0], [10, 10]], closed=True)
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["vertex_count"] == 3
+        assert r.payload["vertices"][0] == [0.0, 0.0]
+        assert r.payload["closed"] is True
+        assert r.payload["vertices_truncated"] is False
+
+    async def test_entity_get_polyline_caps_long_vertex_lists(self, backend):
+        cr = await backend.create_polyline([[i, 0] for i in range(300)])
+        r = await backend.entity_get(cr.payload["handle"])
+        assert r.ok
+        assert r.payload["vertex_count"] == 300
+        assert len(r.payload["vertices"]) == 200
+        assert r.payload["vertices_truncated"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
-"""AutoCAD MCP Server v3.1 — 8 consolidated tools with operation dispatch.
+"""AutoCAD MCP Server v3.2 — 9 consolidated tools with operation dispatch.
 
-Tools: drawing, entity, layer, block, annotation, pid, view, system
+Tools: drawing, entity, layer, block, annotation, pid, view, system, execute_lisp
 """
 
 from __future__ import annotations
@@ -112,9 +112,20 @@ async def entity(
       create_hatch      — entity_id, data: {pattern?}
 
     Read operations:
-      list              — layer? → list entities
-      count             — layer? → count entities
-      get               — entity_id → entity details
+      list   — layer?, data: {type?, limit?, offset?, bbox?}
+               Returns at most `limit` entities (default 200) plus `total`, the
+               number of matches, so you can tell what was left out. Scope the
+               query before running it on a large drawing:
+                 type   — "INSERT" or "INSERT,TEXT" (comma-separated DXF types)
+                 bbox   — [x1, y1, x2, y2]; keeps entities whose base point
+                          falls inside the window (any two opposite corners)
+                 limit  — 0 returns just the count, no entity data
+                 offset — page through matches beyond the first `limit`
+      count  — layer? → count entities
+      get    — entity_id → geometry for LINE, CIRCLE, ARC, ELLIPSE, POINT,
+               TEXT/ATTDEF/ATTRIB, MTEXT, INSERT, LWPOLYLINE/POLYLINE.
+               Angles are returned in degrees. Long vertex lists are capped
+               at 200 with vertices_truncated set.
 
     Modify operations:
       copy    — entity_id, data: {dx, dy}
@@ -150,7 +161,13 @@ async def entity(
         result = await backend.create_hatch(entity_id, data.get("pattern", "ANSI31"))
     # --- Read ---
     elif operation == "list":
-        result = await backend.entity_list(layer)
+        result = await backend.entity_list(
+            layer,
+            etype=data.get("type"),
+            limit=data.get("limit"),
+            offset=data.get("offset"),
+            bbox=data.get("bbox"),
+        )
     elif operation == "count":
         result = await backend.entity_count(layer)
     elif operation == "get":
@@ -465,7 +482,7 @@ async def system(
     data: dict | None = None,
     include_screenshot: bool = False,
 ) -> ToolResult:
-    """Server status and management.
+    """Server status and management. Read-only — see execute_lisp to run code.
 
     Operations:
       status        — Backend info, capabilities, health check.
@@ -473,7 +490,6 @@ async def system(
       get_backend   — Return current backend name and capabilities.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
-      execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
     """
     data = data or {}
 
@@ -509,14 +525,47 @@ async def system(
         backend = await get_backend()
         result = await backend.status()
         return _json(result.to_dict())
-    elif operation == "execute_lisp":
-        backend = await get_backend()
-        if not data.get("code"):
-            return _json({"error": "data.code is required"})
-        result = await backend.execute_lisp(data["code"])
-        return await add_screenshot_if_available(result, include_screenshot)
     else:
         return _json({"error": f"Unknown system operation: {operation}"})
+
+
+# ==========================================================================
+# 9. execute_lisp — Arbitrary AutoLISP execution
+# ==========================================================================
+
+
+@mcp.tool(
+    annotations={
+        "title": "Execute AutoLISP",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+    }
+)
+@_safe("execute_lisp")
+async def execute_lisp(
+    code: str,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Execute arbitrary AutoLISP in the running drawing (File IPC backend only).
+
+    This is the escape hatch for anything the typed tools do not cover. It runs
+    with full AutoLISP privileges — it can erase entities, overwrite files, and
+    change system variables — which is why it is a separate tool from `system`
+    rather than one of its operations: clients that auto-approve read-only tools
+    must not auto-approve this.
+
+    The code is written to a temp file and loaded, so the return value is
+    whatever the last expression evaluates to. Keep it bounded: the IPC round
+    trip times out (10s by default, AUTOCAD_MCP_IPC_TIMEOUT to change), so
+    scans across large drawings should filter with ssget rather than walking
+    every entity and building large strings.
+    """
+    backend = await get_backend()
+    if not code:
+        return _json({"error": "code is required"})
+    result = await backend.execute_lisp(code)
+    return await add_screenshot_if_available(result, include_screenshot)
 
 
 # ==========================================================================
@@ -546,5 +595,5 @@ def main():
         ],
     )
 
-    log.info("autocad_mcp_starting", version="3.1.0")
+    log.info("autocad_mcp_starting", version="3.2.0")
     mcp.run(transport="stdio")

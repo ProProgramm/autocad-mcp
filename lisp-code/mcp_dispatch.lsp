@@ -1,4 +1,4 @@
-;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.1
+;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.2
 ;;;
 ;;; Protocol:
 ;;;   1. Python writes command JSON to C:/temp/autocad_mcp_cmd_{id}.json
@@ -565,25 +565,88 @@
   (cons T (strcat "{\"count\":" (itoa count) "}"))
 )
 
-(defun mcp-cmd-entity-list (params / layer entities ent ent-data etype handle elayer)
-  (setq layer (mcp-json-get-string params "layer"))
-  (setq entities "" ent (entnext))
+(defun mcp-cmd-entity-list (params / layer type-filter types limit offset
+                                   bx1 by1 bx2 by2 use-bbox tmp
+                                   entities ent ent-data etype handle elayer pt
+                                   total emitted)
+  "List entities with layer/type/bbox filters and a hard result cap.
+
+   Walking the whole database is cheap; building one JSON string for every
+   entity is not — strcat is O(n^2) and a 10k-entity drawing blows both the
+   IPC timeout and the caller's token budget. So we always count every match
+   but only serialize the requested window, and report `total` so the caller
+   knows what it did not see."
+  (setq layer       (mcp-json-get-string params "layer"))
+  (setq type-filter (mcp-json-get-string params "type"))
+  (setq limit       (mcp-json-get-number params "limit"))
+  (setq offset      (mcp-json-get-number params "offset"))
+  (setq bx1 (mcp-json-get-number params "bx1")
+        by1 (mcp-json-get-number params "by1")
+        bx2 (mcp-json-get-number params "bx2")
+        by2 (mcp-json-get-number params "by2"))
+
+  (if limit  (setq limit  (fix limit))  (setq limit 200))
+  (if offset (setq offset (fix offset)) (setq offset 0))
+  (if (< limit 0)  (setq limit 0))
+  (if (< offset 0) (setq offset 0))
+
+  ;; Accept any two opposite corners
+  (setq use-bbox (and bx1 by1 bx2 by2))
+  (if use-bbox
+    (progn
+      (if (> bx1 bx2) (progn (setq tmp bx1) (setq bx1 bx2) (setq bx2 tmp)))
+      (if (> by1 by2) (progn (setq tmp by1) (setq by1 by2) (setq by2 tmp)))
+    )
+  )
+
+  ;; "INSERT,TEXT" or "insert, text" -> ("INSERT" "TEXT")
+  (if type-filter
+    (setq types (mapcar '(lambda (s) (vl-string-trim " " s))
+                        (mcp-split-string (strcase type-filter) ",")))
+  )
+
+  (setq entities "" total 0 emitted 0 ent (entnext))
   (while ent
     (setq ent-data (entget ent))
-    (setq etype (cdr (assoc 0 ent-data)))
+    (setq etype  (cdr (assoc 0 ent-data)))
     (setq handle (cdr (assoc 5 ent-data)))
     (setq elayer (cdr (assoc 8 ent-data)))
-    (if (or (not layer) (= elayer layer))
+    (setq pt     (cdr (assoc 10 ent-data)))
+    (if (and (or (not layer) (= elayer layer))
+             (or (not types) (member etype types))
+             ;; bbox tests the base/insertion point, not true extents —
+             ;; entities without a group-10 point are excluded when filtering
+             (or (not use-bbox)
+                 (and pt
+                      (>= (car pt) bx1) (<= (car pt) bx2)
+                      (>= (cadr pt) by1) (<= (cadr pt) by2))))
       (progn
-        (if (> (strlen entities) 0)
-          (setq entities (strcat entities ","))
+        (setq total (1+ total))
+        (if (and (> total offset) (< emitted limit))
+          (progn
+            (if (> (strlen entities) 0) (setq entities (strcat entities ",")))
+            (setq entities
+              (strcat entities
+                "{\"type\":\"" etype
+                "\",\"handle\":\"" handle
+                "\",\"layer\":\"" (mcp-escape-string elayer) "\""
+                (if pt
+                  (strcat ",\"pt\":[" (rtos (car pt) 2 3) "," (rtos (cadr pt) 2 3) "]")
+                  "")
+                "}"))
+            (setq emitted (1+ emitted))
+          )
         )
-        (setq entities (strcat entities "{\"type\":\"" etype "\",\"handle\":\"" handle "\",\"layer\":\"" elayer "\"}"))
       )
     )
     (setq ent (entnext ent))
   )
-  (cons T (strcat "{\"entities\":[" entities "]}"))
+  (cons T (strcat "{\"entities\":[" entities "]"
+                  ",\"returned\":" (itoa emitted)
+                  ",\"offset\":" (itoa offset)
+                  ",\"total\":" (itoa total)
+                  ",\"truncated\":" (if (> total (+ offset emitted)) "true" "false")
+                  "}"))
 )
 
 (defun mcp-cmd-entity-erase (params / entity-id ent)
@@ -841,7 +904,37 @@
 
 ;; --- Entity query: get ---
 
-(defun mcp-cmd-entity-get (params / entity-id ent ent-data etype handle elayer result)
+(defun mcp-pt-json (pt)
+  "Format a DXF point as a JSON [x,y] pair. Returns null for a missing point."
+  (if pt
+    (strcat "[" (rtos (car pt) 2 6) "," (rtos (cadr pt) 2 6) "]")
+    "null"
+  )
+)
+
+(defun mcp-num-json (n default)
+  "Format a number as JSON, substituting a default when the group is absent."
+  (rtos (if n n default) 2 6)
+)
+
+(defun mcp-deg-json (rad)
+  "DXF stores angles in radians; the create/rotate API speaks degrees.
+   Convert on read so values round-trip through this server unchanged."
+  (rtos (if rad (* 180.0 (/ rad pi)) 0.0) 2 6)
+)
+
+(defun mcp-mtext-string (ent-data / txt)
+  "MTEXT longer than 250 chars is split across group 3 chunks with the
+   remainder in group 1. Concatenate in DXF order to recover the full string."
+  (setq txt "")
+  (foreach itm ent-data
+    (if (= (car itm) 3) (setq txt (strcat txt (cdr itm))))
+  )
+  (strcat txt (if (assoc 1 ent-data) (cdr (assoc 1 ent-data)) ""))
+)
+
+(defun mcp-cmd-entity-get (params / entity-id ent ent-data etype handle elayer
+                                  result pts n closed)
   (setq entity-id (mcp-json-get-string params "entity_id"))
   (if (= entity-id "last")
     (setq ent (entlast))
@@ -854,17 +947,89 @@
       (setq etype (cdr (assoc 0 ent-data)))
       (setq handle (cdr (assoc 5 ent-data)))
       (setq elayer (cdr (assoc 8 ent-data)))
-      (setq result (strcat "{\"type\":\"" etype "\",\"handle\":\"" handle "\",\"layer\":\"" elayer "\""))
+      (setq result (strcat "{\"type\":\"" etype "\",\"handle\":\"" handle
+                           "\",\"layer\":\"" (mcp-escape-string elayer) "\""))
       ;; Add type-specific info
       (cond
         ((= etype "LINE")
          (setq result (strcat result
-           ",\"start\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
-           ",\"end\":[" (rtos (car (cdr (assoc 11 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 11 ent-data))) 2 6) "]")))
+           ",\"start\":" (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"end\":"   (mcp-pt-json (cdr (assoc 11 ent-data))))))
+
         ((= etype "CIRCLE")
          (setq result (strcat result
-           ",\"center\":[" (rtos (car (cdr (assoc 10 ent-data))) 2 6) "," (rtos (cadr (cdr (assoc 10 ent-data))) 2 6) "]"
-           ",\"radius\":" (rtos (cdr (assoc 40 ent-data)) 2 6))))
+           ",\"center\":" (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"radius\":" (mcp-num-json (cdr (assoc 40 ent-data)) 0.0))))
+
+        ((= etype "ARC")
+         (setq result (strcat result
+           ",\"center\":"      (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"radius\":"      (mcp-num-json (cdr (assoc 40 ent-data)) 0.0)
+           ",\"start_angle\":" (mcp-deg-json (cdr (assoc 50 ent-data)))
+           ",\"end_angle\":"   (mcp-deg-json (cdr (assoc 51 ent-data))))))
+
+        ((= etype "ELLIPSE")
+         (setq result (strcat result
+           ",\"center\":"     (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"major_axis\":" (mcp-pt-json (cdr (assoc 11 ent-data)))
+           ",\"ratio\":"      (mcp-num-json (cdr (assoc 40 ent-data)) 1.0))))
+
+        ((= etype "POINT")
+         (setq result (strcat result
+           ",\"position\":" (mcp-pt-json (cdr (assoc 10 ent-data))))))
+
+        ((or (= etype "TEXT") (= etype "ATTDEF") (= etype "ATTRIB"))
+         (setq result (strcat result
+           ",\"text\":\""    (mcp-escape-string (cdr (assoc 1 ent-data))) "\""
+           ",\"position\":"  (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"height\":"    (mcp-num-json (cdr (assoc 40 ent-data)) 0.0)
+           ",\"rotation\":"  (mcp-deg-json (cdr (assoc 50 ent-data)))
+           (if (assoc 2 ent-data)
+             (strcat ",\"tag\":\"" (mcp-escape-string (cdr (assoc 2 ent-data))) "\"")
+             ""))))
+
+        ((= etype "MTEXT")
+         (setq result (strcat result
+           ",\"text\":\""   (mcp-escape-string (mcp-mtext-string ent-data)) "\""
+           ",\"position\":" (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"height\":"   (mcp-num-json (cdr (assoc 40 ent-data)) 0.0)
+           ",\"width\":"    (mcp-num-json (cdr (assoc 41 ent-data)) 0.0)
+           ",\"rotation\":" (mcp-deg-json (cdr (assoc 50 ent-data))))))
+
+        ((= etype "INSERT")
+         (setq result (strcat result
+           ",\"name\":\""     (mcp-escape-string (cdr (assoc 2 ent-data))) "\""
+           ",\"position\":"   (mcp-pt-json (cdr (assoc 10 ent-data)))
+           ",\"xscale\":"     (mcp-num-json (cdr (assoc 41 ent-data)) 1.0)
+           ",\"yscale\":"     (mcp-num-json (cdr (assoc 42 ent-data)) 1.0)
+           ",\"rotation\":"   (mcp-deg-json (cdr (assoc 50 ent-data)))
+           ",\"has_attributes\":"
+             (if (and (assoc 66 ent-data) (= (cdr (assoc 66 ent-data)) 1)) "true" "false"))))
+
+        ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
+         ;; Vertices are repeated group-10 entries; cap the serialized list so a
+         ;; survey polyline with thousands of points cannot blow the result up.
+         (setq pts "" n 0)
+         (foreach itm ent-data
+           (if (= (car itm) 10)
+             (progn
+               (if (< n 200)
+                 (progn
+                   (if (> n 0) (setq pts (strcat pts ",")))
+                   (setq pts (strcat pts (mcp-pt-json (cdr itm))))
+                 )
+               )
+               (setq n (1+ n))
+             )
+           )
+         )
+         (setq closed (and (assoc 70 ent-data)
+                           (= 1 (logand 1 (cdr (assoc 70 ent-data))))))
+         (setq result (strcat result
+           ",\"vertices\":[" pts "]"
+           ",\"vertex_count\":" (itoa n)
+           ",\"vertices_truncated\":" (if (> n 200) "true" "false")
+           ",\"closed\":" (if closed "true" "false"))))
       )
       (setq result (strcat result "}"))
       (cons T result)
@@ -1371,7 +1536,7 @@
 ;; Startup message
 ;; -----------------------------------------------------------------------
 
-(princ "\n=== MCP Dispatch v3.1 loaded ===")
+(princ "\n=== MCP Dispatch v3.2 loaded ===")
 (princ "\nIPC directory: ")
 (princ *mcp-ipc-dir*)
 (princ "\nReady for commands via (c:mcp-dispatch)")

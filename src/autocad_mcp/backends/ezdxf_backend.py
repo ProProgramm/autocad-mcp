@@ -16,6 +16,24 @@ from autocad_mcp.screenshot import MatplotlibScreenshotProvider
 log = structlog.get_logger()
 
 
+def _base_point(entity) -> tuple[float, float] | None:
+    """Return an entity's base point, mirroring DXF group 10 on the LISP side.
+
+    Used for window filtering. This is a base/insertion point, not true
+    extents — a long line whose start lies outside the window is excluded.
+    """
+    dxf = entity.dxf
+    for attr in ("insert", "center", "start", "location"):
+        if dxf.hasattr(attr):
+            p = getattr(dxf, attr)
+            return (p[0], p[1])
+    if entity.dxftype() == "LWPOLYLINE":
+        pts = list(entity.get_points("xy"))
+        if pts:
+            return (pts[0][0], pts[0][1])
+    return None
+
+
 class EzdxfBackend(AutoCADBackend):
     """Pure-Python DXF generation via ezdxf."""
 
@@ -180,17 +198,51 @@ class EzdxfBackend(AutoCADBackend):
         })
         return CommandResult(ok=True, payload={"entity_type": "MTEXT", "handle": e.dxf.handle})
 
-    async def entity_list(self, layer=None) -> CommandResult:
+    async def entity_list(self, layer=None, etype=None, limit=None, offset=None, bbox=None) -> CommandResult:
+        """List entities with the same filter/window semantics as the IPC backend."""
+        limit = 200 if limit is None else max(0, int(limit))
+        offset = 0 if offset is None else max(0, int(offset))
+        types = {t.strip().upper() for t in etype.split(",")} if etype else None
+
+        if bbox:
+            if len(bbox) != 4:
+                return CommandResult(ok=False, error="bbox must be [x1, y1, x2, y2]")
+            bx1, bx2 = sorted((bbox[0], bbox[2]))
+            by1, by2 = sorted((bbox[1], bbox[3]))
+
         entities = []
+        total = 0
         for e in self._msp:
             if layer and e.dxf.get("layer", "0") != layer:
                 continue
-            entities.append({
-                "type": e.dxftype(),
-                "handle": e.dxf.handle,
-                "layer": e.dxf.get("layer", "0"),
-            })
-        return CommandResult(ok=True, payload={"entities": entities, "count": len(entities)})
+            if types and e.dxftype() not in types:
+                continue
+
+            pt = _base_point(e)
+            if bbox:
+                # Matches the LISP side: filter on the base point, and drop
+                # entities that have none rather than guessing at extents.
+                if pt is None or not (bx1 <= pt[0] <= bx2 and by1 <= pt[1] <= by2):
+                    continue
+
+            total += 1
+            if total > offset and len(entities) < limit:
+                item = {
+                    "type": e.dxftype(),
+                    "handle": e.dxf.handle,
+                    "layer": e.dxf.get("layer", "0"),
+                }
+                if pt is not None:
+                    item["pt"] = [round(pt[0], 3), round(pt[1], 3)]
+                entities.append(item)
+
+        return CommandResult(ok=True, payload={
+            "entities": entities,
+            "returned": len(entities),
+            "offset": offset,
+            "total": total,
+            "truncated": total > offset + len(entities),
+        })
 
     async def entity_count(self, layer=None) -> CommandResult:
         if layer:
@@ -206,12 +258,50 @@ class EzdxfBackend(AutoCADBackend):
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
             info = {"type": e.dxftype(), "handle": e.dxf.handle, "layer": e.dxf.get("layer", "0")}
             # Add type-specific info
-            if e.dxftype() == "LINE":
+            etype = e.dxftype()
+            if etype == "LINE":
                 info["start"] = list(e.dxf.start)[:2]
                 info["end"] = list(e.dxf.end)[:2]
-            elif e.dxftype() == "CIRCLE":
+            elif etype == "CIRCLE":
                 info["center"] = list(e.dxf.center)[:2]
                 info["radius"] = e.dxf.radius
+            elif etype == "ARC":
+                info["center"] = list(e.dxf.center)[:2]
+                info["radius"] = e.dxf.radius
+                info["start_angle"] = e.dxf.start_angle
+                info["end_angle"] = e.dxf.end_angle
+            elif etype == "ELLIPSE":
+                info["center"] = list(e.dxf.center)[:2]
+                info["major_axis"] = list(e.dxf.major_axis)[:2]
+                info["ratio"] = e.dxf.ratio
+            elif etype == "POINT":
+                info["position"] = list(e.dxf.location)[:2]
+            elif etype in ("TEXT", "ATTDEF", "ATTRIB"):
+                info["text"] = e.dxf.get("text", "")
+                info["position"] = list(e.dxf.insert)[:2]
+                info["height"] = e.dxf.get("height", 0.0)
+                info["rotation"] = e.dxf.get("rotation", 0.0)
+                if e.dxf.hasattr("tag"):
+                    info["tag"] = e.dxf.tag
+            elif etype == "MTEXT":
+                info["text"] = e.text
+                info["position"] = list(e.dxf.insert)[:2]
+                info["height"] = e.dxf.get("char_height", 0.0)
+                info["width"] = e.dxf.get("width", 0.0)
+                info["rotation"] = e.dxf.get("rotation", 0.0)
+            elif etype == "INSERT":
+                info["name"] = e.dxf.name
+                info["position"] = list(e.dxf.insert)[:2]
+                info["xscale"] = e.dxf.get("xscale", 1.0)
+                info["yscale"] = e.dxf.get("yscale", 1.0)
+                info["rotation"] = e.dxf.get("rotation", 0.0)
+                info["has_attributes"] = bool(list(e.attribs))
+            elif etype == "LWPOLYLINE":
+                pts = [[p[0], p[1]] for p in e.get_points("xy")]
+                info["vertex_count"] = len(pts)
+                info["vertices"] = pts[:200]
+                info["vertices_truncated"] = len(pts) > 200
+                info["closed"] = bool(e.closed)
             return CommandResult(ok=True, payload=info)
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
