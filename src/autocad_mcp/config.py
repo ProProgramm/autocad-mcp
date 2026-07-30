@@ -20,6 +20,12 @@ BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
 # IPC timeout (seconds), clamped to [1, 300]
 IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT", "10.0"))))
 
+# AutoCAD's AutoLISP file I/O reads and writes bytes in the system ANSI
+# codepage, not UTF-8. Both sides of the IPC channel must agree on it or
+# non-ASCII text (German umlauts, French accents) is corrupted in transit.
+# Override for locales whose ANSI codepage is not Windows-1252.
+IPC_ENCODING = os.environ.get("AUTOCAD_MCP_IPC_ENCODING", "cp1252")
+
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")
 

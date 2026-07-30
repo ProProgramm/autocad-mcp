@@ -174,7 +174,12 @@ class AutoCADBackend(ABC):
 
     # --- Layer operations ---
 
-    async def layer_list(self) -> CommandResult:
+    async def layer_list(
+        self,
+        name_filter: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def layer_create(self, name: str, color: str | int = "white", linetype: str = "CONTINUOUS") -> CommandResult:

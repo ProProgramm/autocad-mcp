@@ -450,17 +450,32 @@ class EzdxfBackend(AutoCADBackend):
 
     # --- Layer operations ---
 
-    async def layer_list(self) -> CommandResult:
+    async def layer_list(self, name_filter=None, limit=None, offset=None) -> CommandResult:
+        limit = 200 if limit is None else max(0, int(limit))
+        offset = 0 if offset is None else max(0, int(offset))
+        needle = name_filter.upper() if name_filter else None
+
         layers = []
+        total = 0
         for l in self._doc.layers:
-            layers.append({
-                "name": l.dxf.name,
-                "color": l.dxf.get("color", 7),
-                "linetype": l.dxf.get("linetype", "Continuous"),
-                "is_frozen": l.is_frozen(),
-                "is_locked": l.is_locked(),
-            })
-        return CommandResult(ok=True, payload={"layers": layers})
+            if needle and needle not in l.dxf.name.upper():
+                continue
+            total += 1
+            if total > offset and len(layers) < limit:
+                layers.append({
+                    "name": l.dxf.name,
+                    "color": l.dxf.get("color", 7),
+                    "linetype": l.dxf.get("linetype", "Continuous"),
+                    "is_frozen": l.is_frozen(),
+                    "is_locked": l.is_locked(),
+                })
+        return CommandResult(ok=True, payload={
+            "layers": layers,
+            "returned": len(layers),
+            "offset": offset,
+            "total": total,
+            "truncated": total > offset + len(layers),
+        })
 
     async def layer_create(self, name, color="white", linetype="CONTINUOUS") -> CommandResult:
         if name in self._doc.layers:

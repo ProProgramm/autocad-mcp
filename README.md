@@ -246,7 +246,12 @@ The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
 
 ## What's New in v3.2
 
-Fixes for working on large, real-world drawings.
+Fixes for working on large, real-world drawings. Verified against an
+xref-assembled drawing with 11,271 entities and 4,169 layers.
+
+- **Non-ASCII text is no longer corrupted on the way in** — commands were serialized with `json.dumps` defaults, so `ü` reached the LISP side as the six literal characters `ü`, which its JSON parser has no way to decode. A layer filter for `Weichenblöcke` matched nothing; created text carried visible escapes. Commands are now written in the ANSI codepage AutoLISP actually reads (`AUTOCAD_MCP_IPC_ENCODING`, default `cp1252`), as are `execute_lisp` temp files. Characters outside that codepage produce a clear error instead of silent corruption. Reading was already correct.
+- **`annotation.create_text` works** — it drove the `_TEXT` command positionally, which desyncs whenever the current text style has a fixed height (the height prompt is skipped) and leaves the command open waiting for further lines. It failed with an empty error message for every input. Now uses `entmake`.
+- **Bounded `drawing.info` and `layer.list`** — `drawing.info` emitted every layer name: 330 KB on a 4,169-layer drawing, larger than most clients accept. It now reports `layer_count` with a 25-name sample. `layer.list` takes `filter` (case-insensitive substring), `limit` and `offset`, which is the only practical way to find a layer among thousands.
 
 - **Bounded `entity.list`** — `limit` (default 200), `offset`, `type` and `bbox` filters, with `total` and `truncated` always reported. Previously the command walked the whole database and concatenated one JSON object per entity, which on a 10k-entity drawing exceeded both the IPC timeout and the client's token budget, with no signal that anything had been dropped.
 - **`entity.get` covers real entity types** — ARC, ELLIPSE, POINT, TEXT/ATTDEF/ATTRIB, MTEXT, INSERT and LWPOLYLINE/POLYLINE in addition to LINE and CIRCLE. Block names, insertion points, text content and polyline vertices are now readable; before, everything but LINE and CIRCLE returned only type/handle/layer. Angles are converted to degrees so they round-trip through the create/rotate operations.

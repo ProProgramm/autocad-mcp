@@ -383,6 +383,23 @@ class TestLayerOperations:
         names = [l["name"] for l in r.payload["layers"]]
         assert "0" in names  # Default layer always present
 
+    async def test_layer_list_filters_by_substring(self, backend):
+        await backend.layer_create("FS_N_ALG_Weichenbloecke_BL_Wiv")
+        await backend.layer_create("IB_L_ALG_Titelblatt_BL_EBP")
+        r = await backend.layer_list(name_filter="weichen")
+        assert r.ok
+        assert r.payload["total"] == 1
+        assert r.payload["layers"][0]["name"] == "FS_N_ALG_Weichenbloecke_BL_Wiv"
+
+    async def test_layer_list_caps_and_reports_total(self, backend):
+        for i in range(5):
+            await backend.layer_create(f"L{i}")
+        r = await backend.layer_list(limit=2)
+        assert r.ok
+        assert r.payload["returned"] == 2
+        assert r.payload["total"] >= 6  # 5 created + layer "0"
+        assert r.payload["truncated"] is True
+
     async def test_layer_create(self, backend):
         r = await backend.layer_create("PIPING", color="red", linetype="CONTINUOUS")
         assert r.ok

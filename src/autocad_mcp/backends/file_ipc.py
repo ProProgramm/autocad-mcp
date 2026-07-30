@@ -21,7 +21,7 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
-from autocad_mcp.config import IPC_DIR, IPC_TIMEOUT, LISP_DIR
+from autocad_mcp.config import IPC_DIR, IPC_ENCODING, IPC_TIMEOUT, LISP_DIR
 
 log = structlog.get_logger()
 
@@ -29,6 +29,20 @@ log = structlog.get_logger()
 POLL_INTERVAL = 0.1  # seconds
 TIMEOUT = IPC_TIMEOUT  # seconds (configurable via AUTOCAD_MCP_IPC_TIMEOUT)
 STALE_THRESHOLD = 60.0  # clean up files older than this
+
+
+def encode_command(payload: dict) -> bytes:
+    """Serialize a command for the LISP side to read.
+
+    Two decisions matter here. `ensure_ascii=False` keeps real characters
+    instead of \\uXXXX escapes, which the LISP JSON parser cannot decode and
+    would pass through into the drawing verbatim. The ANSI codepage matches
+    what AutoLISP's file reader expects — UTF-8 bytes arrive as mojibake.
+
+    Raises UnicodeEncodeError for characters outside the codepage; the caller
+    reports that rather than silently corrupting the text.
+    """
+    return json.dumps(payload, ensure_ascii=False).encode(IPC_ENCODING)
 
 
 def find_autocad_window() -> int | None:
@@ -154,7 +168,17 @@ class FileIPCBackend(AutoCADBackend):
                 "params": clean_params,
                 "ts": time.time(),
             }
-            tmp_file.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                tmp_file.write_bytes(encode_command(payload))
+            except UnicodeEncodeError as e:
+                return CommandResult(
+                    ok=False,
+                    error=(
+                        f"Cannot send {e.object[e.start:e.end]!r} to AutoCAD: not "
+                        f"representable in {IPC_ENCODING}, the codepage AutoLISP reads. "
+                        "Set AUTOCAD_MCP_IPC_ENCODING if your AutoCAD uses another one."
+                    ),
+                )
             tmp_file.rename(cmd_file)
 
             # Type the fixed dispatch trigger
@@ -165,12 +189,12 @@ class FileIPCBackend(AutoCADBackend):
             while time.time() < deadline:
                 if result_file.exists():
                     try:
-                        # AutoCAD LISP writes files in Windows-1252 encoding;
-                        # try UTF-8 first (covers ASCII), fall back to cp1252
+                        # AutoLISP writes in the system ANSI codepage; try UTF-8
+                        # first (covers pure ASCII) and fall back to it.
                         try:
                             text = result_file.read_text(encoding="utf-8")
                         except UnicodeDecodeError:
-                            text = result_file.read_text(encoding="cp1252")
+                            text = result_file.read_text(encoding=IPC_ENCODING)
                         data = json.loads(text)
                         # Verify request_id matches
                         if data.get("request_id") == request_id:
@@ -315,7 +339,18 @@ class FileIPCBackend(AutoCADBackend):
         """
         request_id = uuid.uuid4().hex[:12]
         code_file = self._ipc_dir / f"autocad_mcp_lisp_{request_id}.lsp"
-        code_file.write_text(code, encoding="utf-8")
+        # AutoCAD loads .lsp as ANSI, so a UTF-8 file turns every umlaut in a
+        # string literal into two mojibake characters.
+        try:
+            code_file.write_text(code, encoding=IPC_ENCODING)
+        except UnicodeEncodeError:
+            return CommandResult(
+                ok=False,
+                error=(
+                    f"LISP source contains characters not representable in {IPC_ENCODING}, "
+                    "the codepage AutoCAD uses to load .lsp files."
+                ),
+            )
         return await self._dispatch("execute-lisp", {
             "code_file": str(code_file).replace("\\", "/")
         })
@@ -396,8 +431,10 @@ class FileIPCBackend(AutoCADBackend):
 
     # --- Layer operations ---
 
-    async def layer_list(self) -> CommandResult:
-        return await self._dispatch("layer-list", {})
+    async def layer_list(self, name_filter=None, limit=None, offset=None) -> CommandResult:
+        return await self._dispatch("layer-list", {
+            "filter": name_filter, "limit": limit, "offset": offset,
+        })
 
     async def layer_create(self, name, color="white", linetype="CONTINUOUS") -> CommandResult:
         return await self._dispatch("layer-create", {"name": name, "color": color, "linetype": linetype})

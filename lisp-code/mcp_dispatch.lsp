@@ -191,7 +191,7 @@
 
     ;; --- Layer operations ---
     ((= cmd-name "layer-list")
-     (mcp-cmd-layer-list))
+     (mcp-cmd-layer-list params-json))
 
     ((= cmd-name "layer-create")
      (mcp-cmd-layer-create params-json))
@@ -425,39 +425,80 @@
 ;; Command implementations
 ;; -----------------------------------------------------------------------
 
-(defun mcp-cmd-drawing-info ( / count layers layer-list)
-  "Return drawing info: entity count, layers, extents."
+(defun mcp-cmd-drawing-info ( / count layers layer-list layer-count)
+  "Return drawing info: entity count, layer count, sample of layer names.
+
+   An xref-assembled drawing can carry thousands of layers; emitting every
+   name produced a payload far larger than any caller could use (4169 layers
+   ran to 330 KB). Report the count, which is what callers actually branch on,
+   and a sample. Use the layer tool for a filtered or paged list."
   (setq count 0)
   (setq ent (entnext))
   (while ent
     (setq count (1+ count))
     (setq ent (entnext ent))
   )
-  (setq layer-list "")
+  (setq layer-list "" layer-count 0)
   (setq layers (tblnext "LAYER" T))
   (while layers
-    (if (> (strlen layer-list) 0)
-      (setq layer-list (strcat layer-list ",\"" (cdr (assoc 2 layers)) "\""))
-      (setq layer-list (strcat "\"" (cdr (assoc 2 layers)) "\""))
+    (if (< layer-count 25)
+      (progn
+        (if (> (strlen layer-list) 0) (setq layer-list (strcat layer-list ",")))
+        (setq layer-list (strcat layer-list "\"" (mcp-escape-string (cdr (assoc 2 layers))) "\""))
+      )
     )
+    (setq layer-count (1+ layer-count))
     (setq layers (tblnext "LAYER"))
   )
-  (cons T (strcat "{\"entity_count\":" (itoa count) ",\"layers\":[" layer-list "]}"))
+  (cons T (strcat "{\"entity_count\":" (itoa count)
+                  ",\"layer_count\":" (itoa layer-count)
+                  ",\"layers\":[" layer-list "]"
+                  ",\"layers_truncated\":" (if (> layer-count 25) "true" "false")
+                  "}"))
 )
 
-(defun mcp-cmd-layer-list ( / layers layer-list name)
-  "Return all layers as JSON array."
-  (setq layer-list "")
+(defun mcp-cmd-layer-list (params / filter limit offset layers layer-list name total emitted)
+  "Return layers, filtered by name substring and capped.
+
+   Same reasoning as entity-list: on an xref-assembled drawing the layer table
+   runs to thousands of entries, so returning all of them is useless to the
+   caller and expensive to build. `filter` is a case-insensitive substring
+   match, which is how you actually find a layer among 4000."
+  (setq filter (mcp-json-get-string params "filter"))
+  (setq limit  (mcp-json-get-number params "limit"))
+  (setq offset (mcp-json-get-number params "offset"))
+  (if limit  (setq limit  (fix limit))  (setq limit 200))
+  (if offset (setq offset (fix offset)) (setq offset 0))
+  (if (< limit 0)  (setq limit 0))
+  (if (< offset 0) (setq offset 0))
+  (if filter (setq filter (strcase filter)))
+
+  (setq layer-list "" total 0 emitted 0)
   (setq layers (tblnext "LAYER" T))
   (while layers
     (setq name (cdr (assoc 2 layers)))
-    (if (> (strlen layer-list) 0)
-      (setq layer-list (strcat layer-list ",{\"name\":\"" name "\",\"color\":" (itoa (cdr (assoc 62 layers))) "}"))
-      (setq layer-list (strcat "{\"name\":\"" name "\",\"color\":" (itoa (cdr (assoc 62 layers))) "}"))
+    (if (or (not filter) (vl-string-search filter (strcase name)))
+      (progn
+        (setq total (1+ total))
+        (if (and (> total offset) (< emitted limit))
+          (progn
+            (if (> (strlen layer-list) 0) (setq layer-list (strcat layer-list ",")))
+            (setq layer-list (strcat layer-list
+              "{\"name\":\"" (mcp-escape-string name)
+              "\",\"color\":" (itoa (cdr (assoc 62 layers))) "}"))
+            (setq emitted (1+ emitted))
+          )
+        )
+      )
     )
     (setq layers (tblnext "LAYER"))
   )
-  (cons T (strcat "{\"layers\":[" layer-list "]}"))
+  (cons T (strcat "{\"layers\":[" layer-list "]"
+                  ",\"returned\":" (itoa emitted)
+                  ",\"offset\":" (itoa offset)
+                  ",\"total\":" (itoa total)
+                  ",\"truncated\":" (if (> total (+ offset emitted)) "true" "false")
+                  "}"))
 )
 
 (defun mcp-cmd-layer-create (params / name color linetype)
@@ -536,7 +577,7 @@
   (cons T (strcat "{\"entity_type\":\"LWPOLYLINE\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-text (params / x y text height rotation layer)
+(defun mcp-cmd-create-text (params / x y text height rotation layer pt)
   (setq x (mcp-json-get-number params "x"))
   (setq y (mcp-json-get-number params "y"))
   (setq text (mcp-json-get-string params "text"))
@@ -548,8 +589,25 @@
   (if layer
     (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer))
   )
-  (command "_TEXT" "J" "M" (list x y 0.0) height rotation text)
-  (cons T (strcat "{\"entity_type\":\"TEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
+  ;; entmake rather than (command "_TEXT" "J" "M" ...): the prompt sequence for
+  ;; _TEXT depends on the current text style — one with a fixed height skips the
+  ;; height prompt, so every argument after it lands in the wrong slot — and
+  ;; _TEXT keeps asking for further lines until an empty response the IPC
+  ;; channel never sends. entmake writes the entity directly, no prompts.
+  (setq pt (list x y 0.0))
+  (if (entmake (list '(0 . "TEXT")
+                     '(100 . "AcDbEntity")
+                     (cons 8 (if layer layer (getvar "CLAYER")))
+                     '(100 . "AcDbText")
+                     (cons 10 pt)
+                     (cons 40 height)
+                     (cons 1 text)
+                     (cons 50 (* pi (/ rotation 180.0)))
+                     '(72 . 4)        ; middle justification, as the old form used
+                     (cons 11 pt)))
+    (cons T (strcat "{\"entity_type\":\"TEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
+    (cons nil "entmake rejected the TEXT entity — check the layer and current text style")
+  )
 )
 
 (defun mcp-cmd-entity-count (params / layer count ent ent-data)

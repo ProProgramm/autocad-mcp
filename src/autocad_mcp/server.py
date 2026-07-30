@@ -214,7 +214,11 @@ async def layer(
     """Layer creation and management.
 
     Operations:
-      list            — List all layers with properties.
+      list            — data: {filter?, limit?, offset?}
+                        Capped at `limit` layers (default 200) plus `total`.
+                        `filter` is a case-insensitive substring match on the
+                        name — the practical way to find a layer in an
+                        xref-assembled drawing carrying thousands of them.
       create          — data: {name, color?, linetype?}
       set_current     — data: {name}
       set_properties  — data: {name, color?, linetype?, lineweight?}
@@ -227,7 +231,11 @@ async def layer(
     backend = await get_backend()
 
     if operation == "list":
-        result = await backend.layer_list()
+        result = await backend.layer_list(
+            name_filter=data.get("filter"),
+            limit=data.get("limit"),
+            offset=data.get("offset"),
+        )
     elif operation == "create":
         result = await backend.layer_create(data["name"], data.get("color", "white"), data.get("linetype", "CONTINUOUS"))
     elif operation == "set_current":

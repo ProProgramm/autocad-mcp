@@ -16,6 +16,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from autocad_mcp.backends.base import BackendCapabilities, CommandResult
+from autocad_mcp.backends.file_ipc import encode_command
+from autocad_mcp.config import IPC_ENCODING
+
+
+# ---------------------------------------------------------------------------
+# Command encoding — AutoLISP reads the ANSI codepage, not UTF-8
+# ---------------------------------------------------------------------------
+
+
+class TestCommandEncoding:
+    def test_umlauts_survive_the_round_trip(self):
+        payload = {"params": {"layer": "FS_N_ALG_Weichenblöcke_BL_Wiv"}}
+        decoded = json.loads(encode_command(payload).decode(IPC_ENCODING))
+        assert decoded["params"]["layer"] == "FS_N_ALG_Weichenblöcke_BL_Wiv"
+
+    def test_no_unicode_escapes_emitted(self):
+        # The LISP parser has no \uXXXX decoding — an escape would reach the
+        # drawing as literal text, so the bytes must carry real characters.
+        raw = encode_command({"params": {"text": "Höhe"}})
+        assert rb"\u" not in raw
+        assert "Höhe".encode(IPC_ENCODING) in raw
+
+    def test_unencodable_character_raises(self):
+        with pytest.raises(UnicodeEncodeError):
+            encode_command({"params": {"text": "深圳"}})
 
 
 # ---------------------------------------------------------------------------
