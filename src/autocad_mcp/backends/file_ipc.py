@@ -135,6 +135,12 @@ class FileIPCBackend(AutoCADBackend):
 
         return CommandResult(ok=True, payload={"backend": "file_ipc", "hwnd": self._hwnd})
 
+    async def list_commands(self) -> CommandResult:
+        return await self._dispatch("list-commands", {})
+
+    async def reload_lisp(self) -> CommandResult:
+        return await self._dispatch("reload-modules", {})
+
     async def status(self) -> CommandResult:
         info = {
             "backend": "file_ipc",

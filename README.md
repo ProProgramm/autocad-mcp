@@ -188,6 +188,11 @@ extract of 292 blocks with two tags takes ~0.3 s.
 
 `setup_layers`, `insert_symbol`, `list_symbols`, `draw_process_line`, `connect_equipment`, `add_flow_arrow`, `add_equipment_tag`, `add_line_number`, `insert_valve`, `insert_instrument`, `insert_pump`, `insert_tank`
 
+> **The P&ID module is not loaded by default.** It is a self-contained domain
+> most users never touch, so it is commented out of the module list in
+> `mcp_dispatch.lsp` — uncomment `"mcp_pid.lsp"` there to enable it. Without it,
+> `pid` operations return an unknown-command error naming the cause.
+
 > P&ID symbol insertion requires the [CAD Tools Online](https://www.cadtoolsonline.com/) (CTO) P&ID Symbol Library installed at `C:\PIDv4-CTO\`. The ezdxf backend has built-in CTO library support. For the File IPC backend, some P&ID operations require additional LISP helpers — see the P&ID section in the wiki for setup details.
 
 ### `view` — Viewport and screenshot
@@ -216,6 +221,42 @@ command set.
 > write files, and change system variables. Keeping it out of the read-only tool
 > means a client that auto-approves `system` does not thereby auto-approve
 > arbitrary code execution.
+
+## LISP module layout
+
+The dispatcher is split by domain. `mcp_dispatch.lsp` is a loader that pulls in
+the modules; loading it is still the single entry point, so existing APPLOAD and
+`acaddoc.lsp` setups are unaffected.
+
+| File | Contents |
+|---|---|
+| `mcp_core.lsp` | JSON helpers, the command registry, `c:mcp-dispatch` |
+| `mcp_system.lsp` | `ping`, `execute-lisp` |
+| `mcp_drawing.lsp` | drawing file management, undo/redo |
+| `mcp_entity.lsp` | entity creation, query, modification |
+| `mcp_layer.lsp` | layer management |
+| `mcp_block.lsp` | block insertion, attributes, bulk extraction |
+| `mcp_annotation.lsp` | text, dimensions, leaders |
+| `mcp_view.lsp` | viewport control |
+| `mcp_pid.lsp` | P&ID symbols — **not loaded by default** |
+
+Commands register themselves at the bottom of their own module:
+
+```lisp
+(mcp-register "block-extract" 'mcp-cmd-block-extract)
+```
+
+There is no central dispatch table, so adding a command touches one file. The
+registry is still a whitelist — only registered names dispatch, and caller input
+is never evaluated. Every handler takes exactly one argument (the raw command
+JSON) so the registry can invoke them uniformly; `tests/test_lisp_registry.py`
+enforces that, checks that every command Python dispatches is registered, and
+balances parens in each module.
+
+Because modules are located with `findfile`, the `lisp-code` folder must be on
+the Support File Search Path. `system(operation="commands")` reports what is
+actually registered in the running drawing, and `system(operation="reload_lisp")`
+re-loads the modules after an edit without restarting AutoCAD.
 
 ## Architecture
 

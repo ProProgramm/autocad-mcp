@@ -61,6 +61,14 @@ class AutoCADBackend(ABC):
     async def status(self) -> CommandResult:
         """Return backend health/status info."""
 
+    # --- Dispatcher introspection (File IPC only) ---
+
+    async def list_commands(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def reload_lisp(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
     # --- Drawing management ---
 
     async def drawing_info(self) -> CommandResult:

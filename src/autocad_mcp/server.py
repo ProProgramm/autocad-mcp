@@ -521,6 +521,11 @@ async def system(
       get_backend   — Return current backend name and capabilities.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
+      commands      — List the command names the LISP side has registered.
+                      Use this to confirm which modules are actually loaded.
+      reload_lisp   — Re-load the LISP modules in the running drawing, so an
+                      edit to lisp-code/ takes effect without restarting
+                      AutoCAD. Needs a working dispatcher already loaded.
     """
     data = data or {}
 
@@ -528,6 +533,12 @@ async def system(
         backend = await get_backend()
         result = await backend.status()
         return await add_screenshot_if_available(result, include_screenshot)
+    elif operation == "commands":
+        backend = await get_backend()
+        return _json((await backend.list_commands()).to_dict())
+    elif operation == "reload_lisp":
+        backend = await get_backend()
+        return _json((await backend.reload_lisp()).to_dict())
     elif operation == "health":
         try:
             backend = await get_backend()

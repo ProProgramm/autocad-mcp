@@ -26,7 +26,9 @@
 (if (not c:mcp-dispatch)
   (progn
     ;; findfile resolves against the support search path, so this works
-    ;; wherever the repo lives once step 1 above is done.
+    ;; wherever the repo lives once step 1 above is done. mcp_dispatch.lsp is
+    ;; a loader — it locates the mcp_*.lsp modules the same way, which is why
+    ;; the search path entry is required rather than merely convenient.
     (setq *mcp-dispatch-path* (findfile "mcp_dispatch.lsp"))
     (if *mcp-dispatch-path*
       (load *mcp-dispatch-path*)
