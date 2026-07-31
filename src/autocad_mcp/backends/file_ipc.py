@@ -51,26 +51,69 @@ def encode_command(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode(IPC_ENCODING)
 
 
-def find_autocad_window() -> int | None:
-    """Find the AutoCAD LT window handle by checking window titles."""
-    if sys.platform != "win32":
-        return None
+def _has_mdi_client(hwnd) -> bool:
+    """True if the window owns an MDIClient child.
+
+    AutoCAD's main frame does; a browser tab or editor that merely has
+    "autocad" in its title does not. This is also the child the dispatch
+    trigger is posted to, so it is the structure that actually matters.
+    """
     try:
         import win32gui
 
-        windows: list[int] = []
+        found = []
 
-        def callback(hwnd, result):
-            if win32gui.IsWindowVisible(hwnd):
-                text = win32gui.GetWindowText(hwnd).lower()
-                if "autocad" in text and ("drawing" in text or ".dwg" in text):
-                    result.append(hwnd)
+        def cb(child, _):
+            if win32gui.GetClassName(child) == "MDIClient":
+                found.append(child)
+                return False
             return True
 
-        win32gui.EnumWindows(callback, windows)
-        return windows[0] if windows else None
+        win32gui.EnumChildWindows(hwnd, cb, None)
+        return bool(found)
+    except Exception:
+        return False
+
+
+def _title_has_drawing(title: str) -> bool:
+    """Whether the title suggests a drawing is open rather than the Start tab.
+
+    A drawing name appears in the title, so ".dwg" is the reliable marker;
+    "[Start]" (or its localised equivalent) means no document is open and
+    therefore no LISP namespace for the dispatcher to live in.
+    """
+    lowered = title.lower()
+    return ".dwg" in lowered or "drawing" in lowered
+
+
+def find_autocad_windows() -> list[tuple[int, str]]:
+    """Return (hwnd, title) for every AutoCAD main window, drawings first."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import win32gui
     except ImportError:
-        return None
+        return []
+
+    candidates: list[tuple[int, str]] = []
+
+    def callback(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if "autocad" in title.lower() and _has_mdi_client(hwnd):
+                candidates.append((hwnd, title))
+        return True
+
+    win32gui.EnumWindows(callback, None)
+    # Prefer a window with a drawing open; one sitting on the Start tab cannot
+    # run LISP, but reporting it lets the caller say so precisely.
+    return sorted(candidates, key=lambda c: not _title_has_drawing(c[1]))
+
+
+def find_autocad_window() -> int | None:
+    """Find the AutoCAD window handle, preferring one with a drawing open."""
+    windows = find_autocad_windows()
+    return windows[0][0] if windows else None
 
 
 class FileIPCBackend(AutoCADBackend):
@@ -104,9 +147,28 @@ class FileIPCBackend(AutoCADBackend):
 
     async def initialize(self) -> CommandResult:
         """Find AutoCAD window and verify dispatcher is loaded."""
-        self._hwnd = find_autocad_window()
-        if not self._hwnd:
-            return CommandResult(ok=False, error="AutoCAD LT window not found")
+        windows = find_autocad_windows()
+        if not windows:
+            return CommandResult(
+                ok=False,
+                error=(
+                    "No AutoCAD window found. Start AutoCAD and open a drawing "
+                    "(the Windows-native process — a WSL or remote session cannot "
+                    "reach it)."
+                ),
+            )
+        self._hwnd, title = windows[0]
+        if not _title_has_drawing(title):
+            # AutoCAD sitting on the Start tab has no open document, and AutoLISP
+            # lives in a document namespace — there is nothing to dispatch into.
+            return CommandResult(
+                ok=False,
+                error=(
+                    f"AutoCAD is running ({title}) but no drawing is open. "
+                    "AutoLISP runs in a document namespace, so open or create a "
+                    "drawing and retry."
+                ),
+            )
 
         # Set up screenshot provider
         try:

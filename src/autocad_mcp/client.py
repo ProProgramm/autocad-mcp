@@ -79,8 +79,8 @@ def _error(e: Exception, context: str = "") -> str:
     msg = str(e)
     msg_lower = msg.lower()
 
-    if "window not found" in msg_lower or "no autocad" in msg_lower:
-        hint = "AutoCAD LT is not running or no drawing is open. Start AutoCAD and open a .dwg file."
+    if "window not found" in msg_lower or "no autocad" in msg_lower or "no drawing is open" in msg_lower:
+        hint = "AutoCAD is not running, or is running with no drawing open. Open a .dwg and retry."
     elif "timeout" in msg_lower:
         hint = "Command timed out. AutoCAD may be in a modal dialog. Press ESC in AutoCAD and retry."
     elif "not supported" in msg_lower or "backend" in msg_lower:

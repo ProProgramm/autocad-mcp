@@ -561,3 +561,30 @@ class TestVariableNameStripping:
         names = None
         names_str = "" if not names else ";".join(names)
         assert names_str == ""
+
+
+# ---------------------------------------------------------------------------
+# Window detection
+# ---------------------------------------------------------------------------
+
+
+class TestWindowTitleHeuristic:
+    """AutoCAD opens on a Start tab with no document. AutoLISP lives in a
+    document namespace, so that state must be told apart from 'not running' --
+    the two need completely different advice."""
+
+    def test_start_tab_is_not_a_drawing(self):
+        from autocad_mcp.backends.file_ipc import _title_has_drawing
+
+        assert not _title_has_drawing("Autodesk AutoCAD 2024 - [Start]")
+
+    def test_open_drawing_is_recognised(self):
+        from autocad_mcp.backends.file_ipc import _title_has_drawing
+
+        assert _title_has_drawing("Autodesk AutoCAD 2024 - [Zeichnung1.dwg]")
+        assert _title_has_drawing("Autodesk AutoCAD 2024 - [MSZW_BP_A1.dwg]")
+
+    def test_english_new_drawing_is_recognised(self):
+        from autocad_mcp.backends.file_ipc import _title_has_drawing
+
+        assert _title_has_drawing("Autodesk AutoCAD 2024 - [Drawing1]")
