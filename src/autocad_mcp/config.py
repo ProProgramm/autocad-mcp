@@ -26,6 +26,16 @@ IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT"
 # Override for locales whose ANSI codepage is not Windows-1252.
 IPC_ENCODING = os.environ.get("AUTOCAD_MCP_IPC_ENCODING", "cp1252")
 
+# Write acaddoc.lsp into AutoCAD's roamable support folder at startup so the
+# dispatcher loads into every drawing. This also adds lisp-code to TRUSTEDPATHS,
+# without which SECURELOAD raises a modal dialog that blocks the IPC channel.
+# Set to 0 to leave AutoCAD's configuration untouched.
+AUTO_INSTALL_AUTOLOAD = os.environ.get("AUTOCAD_MCP_AUTOLOAD", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")
 

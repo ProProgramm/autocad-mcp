@@ -21,7 +21,13 @@ from pathlib import Path
 import structlog
 
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
-from autocad_mcp.config import IPC_DIR, IPC_ENCODING, IPC_TIMEOUT, LISP_DIR
+from autocad_mcp.config import (
+    AUTO_INSTALL_AUTOLOAD,
+    IPC_DIR,
+    IPC_ENCODING,
+    IPC_TIMEOUT,
+    LISP_DIR,
+)
 
 log = structlog.get_logger()
 
@@ -119,6 +125,12 @@ class FileIPCBackend(AutoCADBackend):
 
         # Clean up stale IPC files
         self._cleanup_stale_files()
+
+        # Install the auto-loader. This does not affect the session already
+        # running — acaddoc.lsp is read when a document opens — so a first run
+        # still reports the dispatcher as missing and takes effect next start.
+        if AUTO_INSTALL_AUTOLOAD:
+            self._install_autoload()
 
         # Ping the dispatcher to verify it's loaded
         result = await self._dispatch("ping", {})
@@ -284,6 +296,23 @@ class FileIPCBackend(AutoCADBackend):
             time.sleep(0.05)
         except Exception as e:
             log.error("dispatch_trigger_failed", error=str(e))
+
+    def _install_autoload(self):
+        """Write acaddoc.lsp so the dispatcher loads into every drawing.
+
+        Best-effort: a failure here must never stop the backend starting, since
+        the server is perfectly usable with a hand-loaded dispatcher.
+        """
+        try:
+            from autocad_mcp import autoload
+
+            for path, action in autoload.install(LISP_DIR, encoding=IPC_ENCODING):
+                if action in ("created", "updated"):
+                    log.info("autoload_installed", path=str(path), action=action)
+                elif action.startswith("failed"):
+                    log.warning("autoload_install_failed", path=str(path), detail=action)
+        except Exception as e:
+            log.warning("autoload_install_error", error=str(e))
 
     def _cleanup_stale_files(self):
         """Remove stale IPC files from previous sessions."""

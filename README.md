@@ -30,28 +30,53 @@ cd autocad-mcp
 uv sync
 ```
 
-### 2. Load the LISP dispatcher in AutoCAD LT
+### 2. Load the LISP dispatcher in AutoCAD
 
-**Recommended — auto-load into every drawing.** AutoLISP definitions live in a
-per-document namespace, so a dispatcher loaded by hand exists only in the drawing
-that was open at the time. Open or switch drawings and the server goes silent
-until you reload. `acaddoc.lsp` avoids this by loading once per document:
+**This happens automatically.** On startup the server writes an `acaddoc.lsp`
+into AutoCAD's per-user roamable support folder, which is on the support file
+search path by default — so no OPTIONS dialog and no registry editing. Restart
+AutoCAD once after first running the server and the dispatcher is loaded into
+every drawing from then on.
 
-1. **OPTIONS > Files > Support File Search Path** — add `<repo>/lisp-code`
-2. **OPTIONS > Files > Trusted Locations** — add the same folder
-   (without this, SECURELOAD blocks the load with a modal dialog, which also
-   blocks the IPC channel)
-3. Restart AutoCAD
+This matters because AutoLISP definitions live in a per-document namespace: a
+dispatcher loaded by hand exists only in the drawing that was open at the time,
+so opening or switching drawings leaves the server silent until you reload.
+`acaddoc.lsp` is read once per document, which is what makes it follow you.
+
+The generated block also adds `<repo>/lisp-code` to `TRUSTEDPATHS`. Without it,
+SECURELOAD raises a modal dialog when loading from an untrusted folder, and a
+modal dialog blocks the IPC channel — the server hangs rather than fails.
+
+> **This is a security relaxation.** Any `.lsp`, `.fas` or `.arx` in that folder
+> will load without a SECURELOAD warning from then on. Set
+> `AUTOCAD_MCP_AUTOLOAD=0` to leave AutoCAD's configuration untouched, and load
+> the dispatcher by hand instead.
+
+Inspect or reverse it:
+
+```bash
+python scripts/install_autoload.py --dry-run
+```
+
+```bash
+python scripts/install_autoload.py --uninstall
+```
+
+The generated lines live inside a marked block, so an existing `acaddoc.lsp`
+keeps whatever else it contains, reinstalling replaces the block rather than
+appending a copy, and uninstalling removes only what was added.
 
 **Manual alternative — APPLOAD:**
 
 1. Type `APPLOAD` in the AutoCAD command line
 2. Browse to `<repo>/lisp-code/mcp_dispatch.lsp`
 3. Click **Load**
-4. You should see: `=== MCP Dispatch v3.2 loaded ===` and `Ready for commands via (c:mcp-dispatch)`
+4. You should see `=== MCP Dispatch v3.3 loaded ===` and the registered command count
 
-> Startup Suite has the same per-document limitation in multi-document sessions;
-> prefer `acaddoc.lsp` if you work across several drawings.
+> `mcp_dispatch.lsp` is a loader that finds its modules with `findfile`. When
+> loading it by absolute path from a folder that is not on the support file
+> search path, set `(setq *mcp-lisp-dir* "C:/path/to/lisp-code/")` first, or it
+> will report the modules as missing.
 
 ### 3. Configure your MCP client
 
@@ -282,6 +307,8 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 | `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
 | `AUTOCAD_MCP_IPC_TIMEOUT` | `10.0` | IPC command timeout in seconds (1-300) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
+| `AUTOCAD_MCP_IPC_ENCODING` | `cp1252` | Codepage AutoLISP reads files in; must match AutoCAD's ANSI codepage or non-ASCII text is corrupted |
+| `AUTOCAD_MCP_AUTOLOAD` | `1` | Write `acaddoc.lsp` into AutoCAD's support folder at startup and add `lisp-code` to `TRUSTEDPATHS`. Set to `0` to leave AutoCAD's configuration alone |
 
 > **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
 
@@ -305,6 +332,13 @@ AutoLISP was added to AutoCAD LT in the **2024 release (Windows only)**. AutoCAD
 | Selection sets | AutoLISP on Mac |
 
 The `mcp_dispatch.lsp` dispatcher is fully compatible with LT 2024+.
+
+## What's New in v3.3
+
+- **Self-installing auto-loader** — the server writes `acaddoc.lsp` into AutoCAD's per-user roamable support folder at startup, so the dispatcher loads into every drawing with no manual setup. That folder is on the support file search path by default, so nothing needs configuring; it is a plain file write, so it works on LT too. The block also adds `lisp-code` to `TRUSTEDPATHS`, without which SECURELOAD's modal dialog would block the IPC channel. Disable with `AUTOCAD_MCP_AUTOLOAD=0`; inspect or reverse with `scripts/install_autoload.py`.
+- **Modular LISP dispatcher** — commands live in per-domain modules and register themselves, replacing a single 1754-line file with a 260-line `cond`. See [LISP module layout](#lisp-module-layout).
+- **Layer operations rewritten** — `create`, `set_properties`, `freeze`, `thaw`, `lock` and `unlock` edit the layer table record directly instead of driving `-LAYER`, whose prompt sequence desynced and left `layer_create` reporting an empty error while applying the wrong colour.
+- **`system.commands` and `system.reload_lisp`** — inspect the command registry, and reload modules after an edit without restarting AutoCAD.
 
 ## What's New in v3.2
 
