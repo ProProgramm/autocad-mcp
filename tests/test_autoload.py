@@ -120,3 +120,35 @@ def test_unwritable_target_does_not_raise(tmp_path, monkeypatch):
     results = autoload.install(LISP_DIR)
     assert len(results) == 1
     assert results[0][1].startswith("failed")
+
+
+IPC_DIR = Path("C:/Users/Someone/AppData/Local/autocad-mcp/ipc")
+
+
+def test_block_carries_the_ipc_directory():
+    """Python owns the IPC path; leaving it to the LISP default meant the two
+    sides could disagree about where command files go, with no error -- the
+    dispatcher simply never sees them."""
+    block = autoload.render_block(LISP_DIR, IPC_DIR)
+    assert '(setq *mcp-ipc-dir* "C:/Users/Someone/AppData/Local/autocad-mcp/ipc/")' in block
+
+
+def test_ipc_directory_is_trusted():
+    """Without this, execute_lisp has to lower SECURELOAD for every call."""
+    block = autoload.render_block(LISP_DIR, IPC_DIR)
+    assert block.count("TRUSTEDPATHS") >= 2
+    # Paths appear backslash-escaped for the LISP string literal.
+    assert str(IPC_DIR).replace("\\", "\\\\") in block
+    assert str(LISP_DIR).replace("\\", "\\\\") in block
+
+
+def test_block_without_ipc_dir_omits_it():
+    block = autoload.render_block(LISP_DIR)
+    assert "*mcp-ipc-dir*" not in block
+
+
+def test_ipc_variant_is_still_ascii_and_idempotent():
+    block = autoload.render_block(LISP_DIR, IPC_DIR)
+    block.encode("ascii")
+    once = autoload.apply_block(None, block)
+    assert autoload.apply_block(once, block) == once

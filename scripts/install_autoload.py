@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from autocad_mcp import autoload  # noqa: E402
-from autocad_mcp.config import IPC_ENCODING, LISP_DIR  # noqa: E402
+from autocad_mcp.config import IPC_DIR, IPC_ENCODING, LISP_DIR  # noqa: E402
 
 
 def main() -> int:
@@ -38,13 +38,17 @@ def main() -> int:
         print(f"  {d}")
 
     if args.dry_run:
-        print(f"\nWould write this block into acaddoc.lsp in each folder:\n")
-        print(autoload.render_block(LISP_DIR))
-        print("Note: this adds the lisp-code folder to TRUSTEDPATHS, so any")
-        print("LISP/ARX in it will load without a SECURELOAD warning.")
+        print("\nWould write this block into acaddoc.lsp in each folder:\n")
+        print(autoload.render_block(LISP_DIR, IPC_DIR))
+        print("Note: this adds both folders to TRUSTEDPATHS, so any LISP/ARX in")
+        print("them will load without a SECURELOAD warning.")
         return 0
 
-    results = autoload.uninstall(IPC_ENCODING) if args.uninstall else autoload.install(LISP_DIR, IPC_ENCODING)
+    results = (
+        autoload.uninstall(IPC_ENCODING)
+        if args.uninstall
+        else autoload.install(LISP_DIR, IPC_ENCODING, ipc_dir=IPC_DIR)
+    )
     print()
     for path, action in results:
         print(f"  {action:14} {path}")

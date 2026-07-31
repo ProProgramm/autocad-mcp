@@ -8,7 +8,34 @@
   (defun report-error (msg) (princ (strcat "\nERROR: " msg)))
 )
 
-(setq *mcp-ipc-dir* "C:/temp/")
+;; Fallback only. acaddoc.lsp sets this from the server's configuration before
+;; loading, so Python stays the single source of truth and the two sides cannot
+;; disagree about where command files go. Do not overwrite a value already set.
+(if (not *mcp-ipc-dir*) (setq *mcp-ipc-dir* "C:/temp/"))
+
+;; Create the IPC directory from this side if it is missing. Both processes
+;; must be able to write there — Python drops command files, AutoCAD drops
+;; results — and a directory created by a process running at a different
+;; integrity level can carry an ACL the other cannot traverse. Creating it
+;; here means AutoCAD can always write to it, and a normal-integrity server
+;; process can too. vl-mkdir returns nil when the directory already exists,
+;; so this is safe to run on every load.
+(vl-mkdir (vl-string-right-trim "/" (vl-string-right-trim "\\" *mcp-ipc-dir*)))
+
+(defun mcp-normalize-path (p)
+  "Upper-case with backslash separators, for comparing against TRUSTEDPATHS."
+  (if p (strcase (vl-string-translate "/" "\\" p)) "")
+)
+
+(defun mcp-path-trusted-p (path / dir tp)
+  "Whether the directory holding `path` is covered by TRUSTEDPATHS."
+  (setq tp (mcp-normalize-path (getvar "TRUSTEDPATHS")))
+  (setq dir (mcp-normalize-path (vl-filename-directory path)))
+  (if (or (= tp "") (= dir ""))
+    nil
+    (if (vl-string-search dir tp) T nil)
+  )
+)
 
 ;; -----------------------------------------------------------------------
 ;; Command registry

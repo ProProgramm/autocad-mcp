@@ -368,7 +368,9 @@ class FileIPCBackend(AutoCADBackend):
         try:
             from autocad_mcp import autoload
 
-            for path, action in autoload.install(LISP_DIR, encoding=IPC_ENCODING):
+            for path, action in autoload.install(
+                LISP_DIR, encoding=IPC_ENCODING, ipc_dir=self._ipc_dir
+            ):
                 if action in ("created", "updated"):
                     log.info("autoload_installed", path=str(path), action=action)
                 elif action.startswith("failed"):

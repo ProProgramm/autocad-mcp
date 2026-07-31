@@ -304,13 +304,13 @@ The File IPC backend sends keystrokes to AutoCAD's MDIClient window via `PostMes
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTOCAD_MCP_BACKEND` | `auto` | Backend selection: `auto`, `file_ipc`, `ezdxf` |
-| `AUTOCAD_MCP_IPC_DIR` | `C:/temp` | Directory for IPC command/result JSON files (must match on both Python and LISP sides) |
+| `AUTOCAD_MCP_IPC_DIR` | `%LOCALAPPDATA%\autocad-mcp-ipc` | Directory for IPC command/result JSON files. The auto-loader writes the matching `*mcp-ipc-dir*` into `acaddoc.lsp`, so both sides stay in sync; with `AUTOCAD_MCP_AUTOLOAD=0` you must set it in the LISP yourself |
 | `AUTOCAD_MCP_IPC_TIMEOUT` | `10.0` | IPC command timeout in seconds (1-300) |
 | `AUTOCAD_MCP_ONLY_TEXT` | `false` | Disable screenshot capture (text feedback only) |
 | `AUTOCAD_MCP_IPC_ENCODING` | `cp1252` | Codepage AutoLISP reads files in; must match AutoCAD's ANSI codepage or non-ASCII text is corrupted |
 | `AUTOCAD_MCP_AUTOLOAD` | `1` | Write `acaddoc.lsp` into AutoCAD's support folder at startup and add `lisp-code` to `TRUSTEDPATHS`. Set to `0` to leave AutoCAD's configuration alone |
 
-> **Note:** If you change `AUTOCAD_MCP_IPC_DIR`, you must also update the `*mcp-ipc-dir*` variable in `mcp_dispatch.lsp` to match.
+> **Note:** The auto-loader writes `*mcp-ipc-dir*` into `acaddoc.lsp`, so both sides stay in sync automatically. With `AUTOCAD_MCP_AUTOLOAD=0` you must set it in the LISP yourself.
 
 ## Development
 

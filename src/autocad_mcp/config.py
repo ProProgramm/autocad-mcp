@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import structlog
@@ -12,7 +13,27 @@ log = structlog.get_logger()
 
 # Paths
 LISP_DIR = Path(__file__).resolve().parent.parent.parent / "lisp-code"
-IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR", "C:/temp"))
+
+
+def _default_ipc_dir() -> Path:
+    """A per-user directory for the command/result files.
+
+    This used to be C:/temp. That is world-writable on a shared machine, so
+    another user could plant or read command files — and since the directory has
+    to be a trusted path for execute_lisp to load from it without lowering
+    SECURELOAD, trusting C:/temp would mean trusting anything anyone drops there.
+    LOCALAPPDATA is per-user and deliberately not roaming: these files are
+    transient IPC, worthless on another machine.
+    """
+    # Deliberately one level deep: the LISP side creates this directory if it is
+    # missing, and vl-mkdir makes a single level at a time.
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "autocad-mcp-ipc"
+    return Path(tempfile.gettempdir()) / "autocad-mcp-ipc"
+
+
+IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR") or _default_ipc_dir())
 
 # Backend selection
 BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
